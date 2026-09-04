@@ -1,5 +1,13 @@
 /**
- * 1-bit (monochrome) Windows BMP encoder.
+ * Windows BMP encoders for monochrome e-ink panels.
+ *
+ * Two containers live here:
+ *  - `encodeBmp1bit`  — 1-bit black & white (2 colours).
+ *  - `encodeGrayBmp`  — 4bpp with an N-entry grayscale palette, used for every panel that shows
+ *                       more than black & white: 4-gray (2-bit) and 8-gray (3-bit) monochrome
+ *                       e-ink, and the 16-gray (4-bit) TRMNL X.
+ *
+ * --- 1-bit ---
  *
  * TRMNL "OG" devices on the older / DIY firmware line (e.g. the Seeed Studio
  * TRMNL 7.5 OG DIY Kit, firmware 1.6.x / 1.8.x) expect a 1-bit BMP image rather
@@ -109,50 +117,95 @@ export function encodeBmp1bit(
   return buf;
 }
 
-// --- 4-bit (16-level) grayscale BMP, for TRMNL X (10.3", 1872x1404, 16 grays) ---
+// --- Multi-level grayscale BMP (4bpp container) ---
+//
+// Grayscale e-ink panels come in a few depths: 4 grays (2-bit — the common "monochrome with
+// grayscale" panels), 8 grays (3-bit) and 16 grays (4-bit — TRMNL X). BMP has no standard 2bpp or
+// 3bpp form (biBitCount is 1/4/8/16/24/32; 2 exists only as a Windows CE extension most decoders
+// reject), so all of them are carried in a 4bpp BMP whose palette holds exactly `levels`
+// evenly-spaced grays. Because the palette is sized to the panel, a pixel's stored index IS its
+// gray level (0 = black … levels-1 = white), which is what a 2-/3-/4-bit panel driver wants.
 
-const GRAY4_INFO_OFFSET = FILE_HEADER_SIZE + INFO_HEADER_SIZE; // 54
-const GRAY4_PALETTE_ENTRIES = 16;
-const GRAY4_PALETTE_SIZE = GRAY4_PALETTE_ENTRIES * 4; // 64
-const GRAY4_PIXEL_OFFSET = GRAY4_INFO_OFFSET + GRAY4_PALETTE_SIZE; // 118
+const GRAY_INFO_OFFSET = FILE_HEADER_SIZE + INFO_HEADER_SIZE; // 54, start of the palette
+const MAX_GRAY_LEVELS = 16; // 4bpp ceiling — one nibble per pixel
 
-/** Map an 8-bit grayscale value (0-255) to a 4-bit level (0-15). */
-export function gray8ToLevel4(v: number): number {
-  return Math.max(0, Math.min(15, Math.round((v / 255) * 15)));
+/** Levels of an 8-bit grayscale source — the most any of our output paths can carry. */
+export const FULL_GRAY_LEVELS = 256;
+
+/**
+ * Gray levels a panel of the given bit depth can show: 1-bit → 2, 2-bit → 4, 3-bit → 8,
+ * 4-bit → 16, 8-bit → 256 (full grayscale, e.g. the Kindle models TRMNL lists).
+ */
+export function grayLevelsForBitDepth(bitDepth: number): number {
+  if (bitDepth <= 1) return 2;
+  return Math.min(FULL_GRAY_LEVELS, 1 << bitDepth);
 }
 
 /**
- * Posterize an 8-bit grayscale buffer to 16 evenly-spaced levels (0x00, 0x11, … 0xFF), matching
- * a 16-level (4-bit) panel. Returns a new 8-bit buffer — used for grayscale PNG output where the
- * container stays 8-bit but the content is limited to the panel's 16 grays (also compresses well).
+ * Gray levels a BMP of ours can actually carry — the 4bpp container tops out at 16, so a deeper
+ * panel asking for BMP is served 16 grays rather than nothing.
  */
-export function quantizeGray16(gray: Buffer | Uint8Array): Buffer {
+export function bmpGrayLevels(levels: number): number {
+  return Math.min(levels, MAX_GRAY_LEVELS);
+}
+
+/** Map an 8-bit grayscale value (0-255) to a level index (0 … levels-1). */
+export function grayToLevel(v: number, levels: number): number {
+  const max = levels - 1;
+  return Math.max(0, Math.min(max, Math.round((v / 255) * max)));
+}
+
+/** Map a level index back to its 8-bit grayscale value (level 0 → 0, level levels-1 → 255). */
+export function levelToGray8(level: number, levels: number): number {
+  return Math.round((level * 255) / (levels - 1));
+}
+
+/** Map an 8-bit grayscale value (0-255) to a 4-bit level (0-15). */
+export function gray8ToLevel4(v: number): number {
+  return grayToLevel(v, MAX_GRAY_LEVELS);
+}
+
+/**
+ * Posterize an 8-bit grayscale buffer to `levels` evenly-spaced grays (4 levels → 0x00, 0x55,
+ * 0xAA, 0xFF; 16 levels → 0x00, 0x11, … 0xFF). Returns a new 8-bit buffer — used for grayscale PNG
+ * output where the container stays 8-bit but the content is limited to the panel's grays (which
+ * also compresses well). For anything but flat graphics, dither first (see `floydSteinbergDither`)
+ * — posterizing alone bands badly at low level counts.
+ */
+export function quantizeGrayLevels(gray: Buffer | Uint8Array, levels: number): Buffer {
   const out = Buffer.alloc(gray.length);
   for (let i = 0; i < gray.length; i++) {
-    out[i] = gray8ToLevel4(gray[i]) * 0x11;
+    out[i] = levelToGray8(grayToLevel(gray[i], levels), levels);
   }
   return out;
 }
 
+/** Posterize to the 16 levels of a 4-bit panel (TRMNL X). */
+export function quantizeGray16(gray: Buffer | Uint8Array): Buffer {
+  return quantizeGrayLevels(gray, MAX_GRAY_LEVELS);
+}
+
 /**
- * Encode single-channel grayscale pixel data as a 4-bit (16-level) grayscale BMP.
+ * Encode single-channel grayscale pixel data as a 4bpp BMP with a `levels`-entry grayscale palette.
  *
- * TRMNL X panels are 16-level grayscale — sending them a matching 4-bit image (rather than the
- * 1-bit dithered output used for OG panels) preserves gradients. Sharp cannot write 4-bit
- * grayscale, so it is hand-encoded here, mirroring `encodeBmp1bit`.
+ * Sending a grayscale panel a matching multi-level image (rather than the 1-bit dithered output
+ * used for pure black & white panels) preserves gradients. Sharp cannot write sub-8-bit grayscale,
+ * so it is hand-encoded here, mirroring `encodeBmp1bit`.
  *
- * Each input pixel is quantized to one of 16 evenly-spaced gray levels (level i → 0x11*i, i.e.
- * 0x00, 0x11, … 0xFF). Output is an uncompressed (BI_RGB) bottom-up BMP with a 16-entry grayscale
- * palette; two pixels are packed per byte (high nibble = leftmost pixel).
+ * Each input pixel is quantized to one of `levels` evenly-spaced gray levels and stored as that
+ * level's palette index. Output is an uncompressed (BI_RGB) bottom-up BMP; two pixels are packed
+ * per byte (high nibble = leftmost pixel).
  *
  * @param gray   - width*height bytes, one grayscale value per pixel, row-major, top-to-bottom
  * @param width  - image width in pixels
  * @param height - image height in pixels
+ * @param levels - gray levels / palette entries (2-16, e.g. 4 for a 2-bit panel)
  */
-export function encodeGray4Bmp(
+export function encodeGrayBmp(
   gray: Buffer | Uint8Array,
   width: number,
   height: number,
+  levels: number = MAX_GRAY_LEVELS,
 ): Buffer {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
     throw new Error(`Invalid BMP dimensions: ${width}x${height}`);
@@ -162,12 +215,19 @@ export function encodeGray4Bmp(
       `Pixel buffer too small for ${width}x${height}: got ${gray.length}, need ${width * height}`,
     );
   }
+  if (!Number.isInteger(levels) || levels < 2 || levels > MAX_GRAY_LEVELS) {
+    throw new Error(
+      `Invalid gray level count for a 4bpp BMP: ${levels} (expected 2-${MAX_GRAY_LEVELS})`,
+    );
+  }
+
+  const pixelOffset = GRAY_INFO_OFFSET + levels * 4;
 
   // 4bpp: ceil(width/2) bytes/row, padded to a 4-byte boundary.
   const rowBytes = Math.ceil(width / 2);
   const rowStride = (rowBytes + 3) & ~3;
   const pixelDataSize = rowStride * height;
-  const fileSize = GRAY4_PIXEL_OFFSET + pixelDataSize;
+  const fileSize = pixelOffset + pixelDataSize;
 
   const buf = Buffer.alloc(fileSize);
 
@@ -175,7 +235,7 @@ export function encodeGray4Bmp(
   buf.write('BM', 0, 'ascii');
   buf.writeUInt32LE(fileSize, 2);
   buf.writeUInt32LE(0, 6);
-  buf.writeUInt32LE(GRAY4_PIXEL_OFFSET, 10);
+  buf.writeUInt32LE(pixelOffset, 10);
 
   // --- BITMAPINFOHEADER ---
   buf.writeUInt32LE(INFO_HEADER_SIZE, 14);
@@ -187,13 +247,13 @@ export function encodeGray4Bmp(
   buf.writeUInt32LE(pixelDataSize, 34);
   buf.writeInt32LE(2835, 38);
   buf.writeInt32LE(2835, 42);
-  buf.writeUInt32LE(GRAY4_PALETTE_ENTRIES, 46);
-  buf.writeUInt32LE(GRAY4_PALETTE_ENTRIES, 50);
+  buf.writeUInt32LE(levels, 46); // colours used
+  buf.writeUInt32LE(levels, 50); // important colours
 
-  // --- Palette: 16 evenly-spaced grays (BGRA) ---
-  for (let i = 0; i < GRAY4_PALETTE_ENTRIES; i++) {
-    const v = i * 0x11; // 0..255 in 16 steps
-    const off = GRAY4_INFO_OFFSET + i * 4;
+  // --- Palette: `levels` evenly-spaced grays (BGRA) ---
+  for (let i = 0; i < levels; i++) {
+    const v = levelToGray8(i, levels);
+    const off = GRAY_INFO_OFFSET + i * 4;
     buf.writeUInt8(v, off);      // B
     buf.writeUInt8(v, off + 1);  // G
     buf.writeUInt8(v, off + 2);  // R
@@ -202,10 +262,10 @@ export function encodeGray4Bmp(
 
   // --- Pixel data (bottom-up, high nibble = leftmost pixel) ---
   for (let y = 0; y < height; y++) {
-    const rowStart = GRAY4_PIXEL_OFFSET + (height - 1 - y) * rowStride;
+    const rowStart = pixelOffset + (height - 1 - y) * rowStride;
     const srcRow = y * width;
     for (let x = 0; x < width; x++) {
-      const level = gray8ToLevel4(gray[srcRow + x]);
+      const level = grayToLevel(gray[srcRow + x], levels);
       const byteIndex = rowStart + (x >> 1);
       if ((x & 1) === 0) {
         buf[byteIndex] |= level << 4; // high nibble
@@ -216,4 +276,28 @@ export function encodeGray4Bmp(
   }
 
   return buf;
+}
+
+/** Encode as a 4-bit, 16-level grayscale BMP (TRMNL X). */
+export function encodeGray4Bmp(
+  gray: Buffer | Uint8Array,
+  width: number,
+  height: number,
+): Buffer {
+  return encodeGrayBmp(gray, width, height, MAX_GRAY_LEVELS);
+}
+
+/**
+ * Encode a BMP for a panel of `levels` grays: a 1-bit BMP for black & white, a 4bpp grayscale BMP
+ * otherwise. Deeper panels are capped to the 4bpp container's 16 grays.
+ */
+export function encodeBmpForLevels(
+  gray: Buffer | Uint8Array,
+  width: number,
+  height: number,
+  levels: number,
+): Buffer {
+  return levels <= 2
+    ? encodeBmp1bit(gray, width, height)
+    : encodeGrayBmp(gray, width, height, bmpGrayLevels(levels));
 }

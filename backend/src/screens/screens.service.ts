@@ -8,7 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateScreenDto } from './dto/create-screen.dto';
 import { UpdateScreenDto } from './dto/update-screen.dto';
 import { wrapListResponse } from '../common/utils/response.util';
-import { ImageProcessorService } from './services/image-processor.service';
+import { ImageProcessorService, grayMasterPath } from './services/image-processor.service';
 import { ScreenRendererService } from '../screen-designer/services/screen-renderer.service';
 import { EventsService } from '../events/events.service';
 import * as path from 'path';
@@ -208,6 +208,8 @@ export class ScreensService {
       // imageUrl format: /uploads/screens/processed_filename.png
       const imagePath = path.join(process.cwd(), imageUrl);
       filesToDelete.push(imagePath);
+      // …and the grayscale master beside it, if this screen has one
+      filesToDelete.push(grayMasterPath(imagePath));
     }
 
     if (thumbnailUrl) {
@@ -276,7 +278,9 @@ export class ScreensService {
       processedPath,
       width,
       height,
-      { dithering: true },
+      // Keep the grayscale master so grayscale panels can re-dither from it (the processed file
+      // is black & white only).
+      { dithering: true, masterPath: grayMasterPath(processedPath) },
     );
 
     // Create thumbnail
@@ -342,7 +346,9 @@ export class ScreensService {
       processedPath,
       width,
       height,
-      { dithering: true },
+      // Keep the grayscale master so grayscale panels can re-dither from it (the processed file
+      // is black & white only).
+      { dithering: true, masterPath: grayMasterPath(processedPath) },
     );
 
     // Create thumbnail
@@ -407,7 +413,9 @@ export class ScreensService {
       processedPath,
       width,
       height,
-      { dithering: true },
+      // Keep the grayscale master so grayscale panels can re-dither from it (the processed file
+      // is black & white only).
+      { dithering: true, masterPath: grayMasterPath(processedPath) },
     );
 
     // Create thumbnail

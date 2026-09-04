@@ -22,12 +22,16 @@ FRESH_INSTALL=0
 echo "[backend] Applying SQLite schema (idempotent)..."
 s6-setuidgid inker node ./node_modules/prisma/build/index.js db push --skip-generate 2>&1 || echo "[backend] Warning: db push had issues, check logs"
 
-# Seed default reference data (device models + widget templates) on EVERY boot. The seed
-# is fully idempotent: it upserts each row with `update: {}`, so it only ADDS what is
-# missing and never modifies or deletes existing data (users, devices, screens, or any
-# customized rows are untouched). Running it on upgrades — not just fresh installs — means
-# an existing instance automatically picks up newly shipped models and widget templates
-# (e.g. the calendar widget, the trmnl_x model) simply by pulling the new image.
+# Seed default reference data on EVERY boot. The seed is idempotent and purely additive —
+# it never modifies or deletes existing rows, so users, devices, screens and any customized
+# data are untouched. The two halves behave differently on purpose:
+#
+#   * Widget templates are added whenever one is missing, so an existing instance picks up a
+#     newly shipped widget (e.g. the calendar) just by pulling the new image. There is no UI
+#     to create them and existing designs reference them by id.
+#   * Device models are seeded ONLY into a database that has none. They're user-managed via
+#     Settings → Display Models (add / edit / delete, or sync from TRMNL), and re-seeding them
+#     every boot would resurrect a model the user deliberately deleted.
 if [ "$FRESH_INSTALL" = "1" ]; then
     echo "[backend] Fresh install — seeding default data..."
 else

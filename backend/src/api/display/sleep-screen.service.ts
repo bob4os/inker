@@ -4,21 +4,17 @@ import * as sharpModule from 'sharp';
 const sharp = (sharpModule as any).default || sharpModule;
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { encodeBmp1bit, encodeGray4Bmp, quantizeGray16 } from '../../common/utils/bmp1bit.util';
+import {
+  encodeBmpForLevels,
+  grayLevelsForBitDepth,
+} from '../../common/utils/bmp1bit.util';
+import {
+  escapeXml,
+  panelPixelsToPng,
+  svgToPanelPixels,
+} from '../../common/utils/panel-image.util';
 
 type SleepFormat = 'png' | 'bmp';
-
-/**
- * Escape XML special characters to prevent SVG corruption
- */
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
 
 /**
  * Sleep Screen Service
@@ -45,12 +41,24 @@ export class SleepScreenService {
   }
 
   /**
-   * Build the cache filename for a given resolution + wake time + format.
-   * e.g. sleep-800x480-0700.png or sleep-800x480-0700.bmp
+   * Build the cache filename for a given resolution + wake time + format + panel depth.
+   * e.g. sleep-800x480-0700.png, sleep-800x480-0700.bmp, sleep-800x480-0700-4gray.png
+   *
+   * Black & white panels keep the unsuffixed name (so existing caches stay valid); grayscale
+   * panels get a depth suffix, otherwise two models sharing a resolution but differing in depth
+   * would overwrite each other's cached screen.
    */
-  private getFilename(width: number, height: number, wakeTime: string, format: SleepFormat = 'png'): string {
+  private getFilename(
+    width: number,
+    height: number,
+    wakeTime: string,
+    format: SleepFormat = 'png',
+    bitDepth: number = 1,
+  ): string {
     const safeWake = wakeTime.replace(/[^0-9]/g, '') || '0000';
-    return `sleep-${width}x${height}-${safeWake}.${format}`;
+    const levels = grayLevelsForBitDepth(bitDepth);
+    const depth = levels === 2 ? '' : `-${levels}gray`;
+    return `sleep-${width}x${height}-${safeWake}${depth}.${format}`;
   }
 
   /**
@@ -68,7 +76,7 @@ export class SleepScreenService {
   ): Promise<{ url: string; filename: string }> {
     const w = width > 0 ? width : this.DEFAULT_WIDTH;
     const h = height > 0 ? height : this.DEFAULT_HEIGHT;
-    const filename = this.getFilename(w, h, wakeTime, format);
+    const filename = this.getFilename(w, h, wakeTime, format, bitDepth);
     const outputPath = path.join(this.assetsDir, filename);
 
     try {
@@ -98,7 +106,7 @@ export class SleepScreenService {
   ): Promise<string | undefined> {
     const w = width > 0 ? width : this.DEFAULT_WIDTH;
     const h = height > 0 ? height : this.DEFAULT_HEIGHT;
-    const filename = this.getFilename(w, h, wakeTime, format);
+    const filename = this.getFilename(w, h, wakeTime, format, bitDepth);
     const outputPath = path.join(this.assetsDir, filename);
     try {
       await this.getSleepScreen(w, h, wakeTime, format, bitDepth);
@@ -117,12 +125,13 @@ export class SleepScreenService {
     width: number,
     height: number,
     wakeTime: string,
+    bitDepth: number = 1,
   ): Promise<Buffer> {
     const w = width > 0 ? width : this.DEFAULT_WIDTH;
     const h = height > 0 ? height : this.DEFAULT_HEIGHT;
-    const filename = this.getFilename(w, h, wakeTime);
+    const filename = this.getFilename(w, h, wakeTime, 'png', bitDepth);
     const outputPath = path.join(this.assetsDir, filename);
-    await this.getSleepScreen(w, h, wakeTime); // ensure generated
+    await this.getSleepScreen(w, h, wakeTime, 'png', bitDepth); // ensure generated
     return sharp(outputPath).png().toBuffer();
   }
 
@@ -139,45 +148,21 @@ export class SleepScreenService {
   ): Promise<void> {
     this.logger.log(`Generating sleep screen: ${width}x${height}, wake=${wakeTime}, bitDepth=${bitDepth}`);
 
-    const svg = this.createSleepScreenSvg(width, height, wakeTime);
+    const bmpPath = path.join(this.assetsDir, this.getFilename(width, height, wakeTime, 'bmp', bitDepth));
+    const pngPath = path.join(this.assetsDir, this.getFilename(width, height, wakeTime, 'png', bitDepth));
+    const levels = grayLevelsForBitDepth(bitDepth);
 
-    const grayBuffer = await sharp(Buffer.from(svg))
-      .grayscale()
-      .normalise()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    const { data, info } = grayBuffer;
+    // Dithered at 2-8 levels (without it the moon's curved edge bands on a 4-gray panel),
+    // posterized at 16 (TRMNL X), untouched at full grayscale.
+    const panel = await svgToPanelPixels(this.createSleepScreenSvg(width, height, wakeTime), levels);
 
-    const bmpPath = path.join(this.assetsDir, this.getFilename(width, height, wakeTime, 'bmp'));
+    await fs.writeFile(pngPath, await panelPixelsToPng(panel));
 
-    if (bitDepth >= 4) {
-      // 16-level grayscale for TRMNL X — full resolution, no 1-bit dithering. Compressed PNG by
-      // default (small); the caller's format governs whether a .bmp variant is written instead.
-      const quantized = quantizeGray16(data);
-      const pngPath = path.join(this.assetsDir, this.getFilename(width, height, wakeTime, 'png'));
-      await sharp(quantized, { raw: { width: info.width, height: info.height, channels: 1 } })
-        .toColorspace('b-w')
-        .png({ compressionLevel: 9 })
-        .toFile(pngPath);
-      await fs.writeFile(bmpPath, encodeGray4Bmp(quantized, info.width, info.height));
-      this.logger.log(`Sleep screen saved to: ${pngPath} (+ 4-bit .bmp, 16-level grayscale)`);
-      return;
-    }
+    // BMP variant for firmware that rejects PNG (issue #31): 1-bit for black & white panels,
+    // 4bpp with a levels-sized grayscale palette otherwise.
+    await fs.writeFile(bmpPath, encodeBmpForLevels(panel.pixels, panel.width, panel.height, levels));
 
-    // 1-bit: grayscale → Floyd-Steinberg dithering → both PNG and 1-bit BMP variants.
-    const dithered = this.applyFloydSteinbergDithering(data, info.width, info.height, 140);
-    const pngPath = path.join(this.assetsDir, this.getFilename(width, height, wakeTime, 'png'));
-
-    await sharp(dithered, {
-      raw: { width: info.width, height: info.height, channels: 1 },
-    })
-      .toColorspace('b-w')
-      .png({ compressionLevel: 9 })
-      .toFile(pngPath);
-
-    await fs.writeFile(bmpPath, encodeBmp1bit(dithered, info.width, info.height));
-
-    this.logger.log(`Sleep screen saved to: ${pngPath} (+ .bmp)`);
+    this.logger.log(`Sleep screen saved to: ${pngPath} (+ .bmp, ${levels} grays)`);
   }
 
   /**
@@ -225,43 +210,4 @@ export class SleepScreenService {
     `.trim();
   }
 
-  /**
-   * Floyd-Steinberg dithering for 1-bit e-ink output (matches DefaultScreenService).
-   */
-  private applyFloydSteinbergDithering(
-    data: Buffer,
-    width: number,
-    height: number,
-    threshold: number,
-  ): Buffer {
-    const pixels = new Float32Array(data.length);
-    for (let i = 0; i < data.length; i++) {
-      const val = data[i];
-      if (val > 200) pixels[i] = 255;
-      else if (val < 55) pixels[i] = 0;
-      else pixels[i] = val;
-    }
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        const oldPixel = pixels[idx];
-        const newPixel = oldPixel > threshold ? 255 : 0;
-        pixels[idx] = newPixel;
-        const error = oldPixel - newPixel;
-        if (x + 1 < width) pixels[idx + 1] += (error * 7) / 16;
-        if (y + 1 < height) {
-          if (x - 1 >= 0) pixels[(y + 1) * width + (x - 1)] += (error * 3) / 16;
-          pixels[(y + 1) * width + x] += (error * 5) / 16;
-          if (x + 1 < width) pixels[(y + 1) * width + (x + 1)] += (error * 1) / 16;
-        }
-      }
-    }
-
-    const result = Buffer.alloc(data.length);
-    for (let i = 0; i < data.length; i++) {
-      result[i] = Math.max(0, Math.min(255, Math.round(pixels[i])));
-    }
-    return result;
-  }
 }

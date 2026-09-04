@@ -3,6 +3,7 @@ import { MainLayout } from '../../components/layout';
 import { DeviceConnection } from '../../components/settings/DeviceConnection';
 import { WelcomeScreenSettings } from '../../components/settings/WelcomeScreenSettings';
 import { ApiSettings } from '../../components/settings/ApiSettings';
+import { DeviceModels } from '../../components/settings/DeviceModels';
 import { Card } from '../../components/common';
 import { settingsService } from '../../services/api';
 import { useNotification } from '../../contexts/NotificationContext';
@@ -131,6 +132,19 @@ export function Settings() {
             <h2 className="text-xl font-semibold text-text-primary">Welcome Screen</h2>
           </div>
           <WelcomeScreenSettings />
+        </div>
+
+        {/* Display Models Section */}
+        <div className="space-y-6">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-gradient-to-br from-sky-100 to-bg-muted rounded-xl">
+              <svg className="w-5 h-5 text-sky-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-semibold text-text-primary">Display Models</h2>
+          </div>
+          <DeviceModels />
         </div>
 
         {/* API Settings Section */}

@@ -2,6 +2,8 @@ import axios, { type AxiosInstance, AxiosError } from 'axios';
 import type {
   Device,
   DeviceModel,
+  DeviceModelFormData,
+  ModelSyncResult,
   DeviceLog,
   Screen,
   Playlist,
@@ -228,15 +230,70 @@ export const deviceService = {
   },
 };
 
-// Device Model Service — list available display models (dimensions + PNG/BMP format)
+// Device Model Service — manage display models (dimensions, PNG/BMP format, panel depth)
 export const modelService = {
   async getAll(): Promise<DeviceModel[]> {
     try {
-      const response = await apiClient.get<ApiResponse<DeviceModel[]>>('/models');
-      // /models is public and may return either a wrapped ApiResponse or a raw array.
+      const response = await apiClient.get('/models');
+      // The list comes back as { data: { items, total } }; a bare array or { data: [...] } is
+      // accepted too. Reading .data straight through yields the wrapper object, not an array —
+      // which is why the model picker used to render as empty.
       const body = response.data as unknown;
       if (Array.isArray(body)) return body as DeviceModel[];
-      return (response.data.data ?? []) as DeviceModel[];
+      const inner = (body as { data?: unknown })?.data;
+      if (Array.isArray(inner)) return inner as DeviceModel[];
+      const items = (inner as { items?: unknown })?.items;
+      return Array.isArray(items) ? (items as DeviceModel[]) : [];
+    } catch (error) {
+      throw new Error(getErrorMessage(error));
+    }
+  },
+
+  /**
+   * Pull the model list from the TRMNL Models API (or MODELS_API_URL). User-triggered.
+   * `dryRun` previews what would change without writing anything.
+   */
+  async sync(dryRun = false): Promise<ModelSyncResult> {
+    try {
+      const response = await apiClient.post<ApiResponse<ModelSyncResult>>(
+        `/models/sync${dryRun ? '?dryRun=true' : ''}`,
+      );
+      return response.data.data;
+    } catch (error) {
+      throw new Error(getErrorMessage(error));
+    }
+  },
+
+  async getById(id: number): Promise<DeviceModel> {
+    try {
+      const response = await apiClient.get<ApiResponse<DeviceModel>>(`/models/${id}`);
+      return response.data.data;
+    } catch (error) {
+      throw new Error(getErrorMessage(error));
+    }
+  },
+
+  async create(data: DeviceModelFormData): Promise<DeviceModel> {
+    try {
+      const response = await apiClient.post<ApiResponse<DeviceModel>>('/models', data);
+      return response.data.data;
+    } catch (error) {
+      throw new Error(getErrorMessage(error));
+    }
+  },
+
+  async update(id: number, data: Partial<DeviceModelFormData>): Promise<DeviceModel> {
+    try {
+      const response = await apiClient.patch<ApiResponse<DeviceModel>>(`/models/${id}`, data);
+      return response.data.data;
+    } catch (error) {
+      throw new Error(getErrorMessage(error));
+    }
+  },
+
+  async delete(id: number): Promise<void> {
+    try {
+      await apiClient.delete(`/models/${id}`);
     } catch (error) {
       throw new Error(getErrorMessage(error));
     }

@@ -4,6 +4,22 @@ import * as sharpModule from 'sharp';
 const sharp = (sharpModule as any).default || sharpModule;
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { floydSteinbergDither } from '../../common/utils/dither.util';
+
+/**
+ * Path of the undithered grayscale master kept beside a processed screen image
+ * (…/processed_foo.png → …/master_foo.png).
+ *
+ * The processed image is dithered to black & white and is what 1-bit devices fetch straight off
+ * disk; grayscale panels re-derive their own image from the master instead, which still has all
+ * its gray levels. Screens uploaded before masters existed simply have no file here — callers fall
+ * back to the processed image.
+ */
+export function grayMasterPath(processedPath: string): string {
+  const base = path.basename(processedPath);
+  const name = base.startsWith('processed_') ? base.slice('processed_'.length) : base;
+  return path.join(path.dirname(processedPath), `master_${name}`);
+}
 
 /**
  * Image Processor Service
@@ -209,81 +225,31 @@ export class ImageProcessorService {
   /**
    * Apply Floyd-Steinberg dithering for better e-ink rendering
    * This algorithm diffuses quantization error to neighboring pixels,
-   * creating the illusion of more gray levels on binary displays.
+   * creating the illusion of more gray levels on displays with few of them.
    *
-   * The error distribution pattern:
-   *       X   7/16
-   * 3/16 5/16 1/16
-   *
-   * This is the classic Floyd-Steinberg pattern for high-quality dithering.
+   * @param levels - gray levels the target panel can show (2 = black & white, 4 = 4-gray, …)
    */
   async applyDithering(
     inputPath: string,
     outputPath: string,
     threshold: number = 128,
+    levels: number = 2,
   ): Promise<string> {
     try {
-      this.logger.debug('Applying Floyd-Steinberg dithering to image');
+      this.logger.debug(`Applying Floyd-Steinberg dithering to image (${levels} levels)`);
 
       // Ensure output directory exists
       const outputDir = path.dirname(outputPath);
       await fs.mkdir(outputDir, { recursive: true });
 
-      // Get image as raw grayscale pixels
-      const image = sharp(inputPath).grayscale().normalise();
-      const metadata = await image.metadata();
-      const width = metadata.width!;
-      const height = metadata.height!;
-
-      // Get raw pixel data (1 byte per pixel for grayscale)
-      const { data, info } = await image
+      // Get image as raw grayscale pixels (1 byte per pixel)
+      const { data, info } = await sharp(inputPath)
+        .grayscale()
+        .normalise()
         .raw()
         .toBuffer({ resolveWithObject: true });
 
-      // Create a writable copy of pixel data
-      const pixels = new Float32Array(data.length);
-      for (let i = 0; i < data.length; i++) {
-        pixels[i] = data[i];
-      }
-
-      // Apply Floyd-Steinberg dithering
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const idx = y * width + x;
-          const oldPixel = pixels[idx];
-
-          // Quantize to black or white
-          const newPixel = oldPixel < threshold ? 0 : 255;
-          pixels[idx] = newPixel;
-
-          // Calculate quantization error
-          const error = oldPixel - newPixel;
-
-          // Distribute error to neighboring pixels (Floyd-Steinberg pattern)
-          // Right pixel: 7/16
-          if (x + 1 < width) {
-            pixels[idx + 1] += (error * 7) / 16;
-          }
-          // Bottom-left pixel: 3/16
-          if (x - 1 >= 0 && y + 1 < height) {
-            pixels[(y + 1) * width + (x - 1)] += (error * 3) / 16;
-          }
-          // Bottom pixel: 5/16
-          if (y + 1 < height) {
-            pixels[(y + 1) * width + x] += (error * 5) / 16;
-          }
-          // Bottom-right pixel: 1/16
-          if (x + 1 < width && y + 1 < height) {
-            pixels[(y + 1) * width + (x + 1)] += (error * 1) / 16;
-          }
-        }
-      }
-
-      // Convert back to Uint8Array, clamping values
-      const output = Buffer.alloc(data.length);
-      for (let i = 0; i < pixels.length; i++) {
-        output[i] = Math.max(0, Math.min(255, Math.round(pixels[i])));
-      }
+      const output = floydSteinbergDither(data, info.width, info.height, { levels, threshold });
 
       // Create output image from processed pixels
       await sharp(output, {
@@ -309,6 +275,11 @@ export class ImageProcessorService {
   /**
    * Process image for e-ink with optional dithering
    * Enhanced version that applies Floyd-Steinberg dithering for better results
+   *
+   * `masterPath` keeps the full-grayscale, pre-dithering version of the image. The dithered output
+   * is what a 1-bit device fetches straight off disk, but it has thrown its gray levels away — a
+   * 4-gray or 16-gray panel needs the master to re-dither from (see
+   * DisplayService.getUploadedScreenForDevice).
    */
   async processForEinkWithDithering(
     inputPath: string,
@@ -319,17 +290,21 @@ export class ImageProcessorService {
       dithering?: boolean;
       threshold?: number;
       contrast?: number;
+      /** Gray levels to dither to. Default 2 (black & white). */
+      levels?: number;
+      /** Where to keep the undithered grayscale master; omitted = don't keep one. */
+      masterPath?: string;
     } = {},
   ): Promise<string> {
     try {
-      const { dithering = true, threshold = 128, contrast = 1.2 } = options;
+      const { dithering = true, threshold = 128, contrast = 1.2, levels = 2, masterPath } = options;
 
       this.logger.debug(
         `Processing image for e-ink with dithering: ${width}x${height}`,
       );
 
       // First resize and prepare the image
-      const tempPath = outputPath.replace('.png', '_temp.png');
+      const tempPath = masterPath ?? outputPath.replace('.png', '_temp.png');
 
       let pipeline = sharp(inputPath)
         .resize(width, height, {
@@ -346,13 +321,18 @@ export class ImageProcessorService {
       // Normalize for better tonal range
       pipeline = pipeline.normalise();
 
+      await fs.mkdir(path.dirname(tempPath), { recursive: true });
       await pipeline.png({ compressionLevel: 9 }).toFile(tempPath);
 
       if (dithering) {
         // Apply Floyd-Steinberg dithering
-        await this.applyDithering(tempPath, outputPath, threshold);
-        // Clean up temp file
-        await fs.unlink(tempPath).catch(() => {});
+        await this.applyDithering(tempPath, outputPath, threshold, levels);
+        // Clean up the intermediate — unless it's the master we were asked to keep
+        if (!masterPath) {
+          await fs.unlink(tempPath).catch(() => {});
+        }
+      } else if (masterPath) {
+        await fs.copyFile(tempPath, outputPath);
       } else {
         // Just rename temp to final
         await fs.rename(tempPath, outputPath);

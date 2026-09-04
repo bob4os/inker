@@ -45,14 +45,25 @@ export class CreateModelDto {
   @MaxLength(100)
   mimeType?: string;
 
-  @ApiProperty({ example: 2, default: 2, description: 'Number of colors' })
+  @ApiProperty({
+    example: 2,
+    default: 2,
+    description: 'Number of colors / gray levels the panel can show (2, 4, 8 or 16)',
+  })
   @IsOptional()
   @IsInt()
   colors?: number;
 
-  @ApiProperty({ example: 1, default: 1, description: 'Bit depth' })
+  @ApiProperty({
+    example: 1,
+    default: 1,
+    description:
+      'Panel bit depth: 1 = black & white, 2 = 4 grays, 3 = 8 grays, 4 = 16 grays (TRMNL X), ' +
+      '8 = full grayscale (e.g. Kindle). BMP output caps at 16 grays.',
+  })
   @IsOptional()
   @IsInt()
+  @IsIn([1, 2, 3, 4, 8])
   bitDepth?: number;
 
   @ApiProperty({ example: 0, default: 0, description: 'Screen rotation degrees' })

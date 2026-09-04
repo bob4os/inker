@@ -7,12 +7,33 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      # prisma generate reads the datasource env var even though it never connects
+      DATABASE_URL: file:./ci.db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install
+        run: cd backend && bun install --frozen-lockfile
+      - name: Generate Prisma client
+        run: cd backend && bunx prisma generate
+      # Type-check before tests: the suite mocks Prisma, so it happily runs past a file
+      # importing a package that isn't installed at all.
+      - name: Type-check
+        run: cd backend && bun run type-check
+      - name: Test
+        run: cd backend && bun test
+
+  frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
-      - name: Test backend
-        run: cd backend && bun install --frozen-lockfile && bun test
-      - name: Test frontend
-        run: cd frontend && bun install --frozen-lockfile && bun run test
+      - name: Install
+        run: cd frontend && bun install --frozen-lockfile
+      - name: Type-check
+        run: cd frontend && bun run type-check
+      - name: Test
+        run: cd frontend && bun run test

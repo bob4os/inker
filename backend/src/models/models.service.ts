@@ -4,16 +4,101 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateModelDto } from './dto/create-model.dto';
 import { UpdateModelDto } from './dto/update-model.dto';
 import { wrapListResponse } from '../common/utils/response.util';
 
+/** TRMNL's public Models API — the same feed other BYOS servers sync their model list from. */
+const DEFAULT_MODELS_API_URL = 'https://usetrmnl.com/api/models';
+
+/**
+ * A model entry as published by a Models API feed. TRMNL's speaks snake_case and wraps the list in
+ * `data`; fields beyond these (palette_ids, css, preview_white_point, …) describe TRMNL's own
+ * renderer and are ignored.
+ */
+interface ExternalModel {
+  name?: string;
+  label?: string;
+  description?: string;
+  width?: number;
+  height?: number;
+  colors?: number;
+  bit_depth?: number;
+  mime_type?: string;
+  scale_factor?: number;
+  rotation?: number;
+  offset_x?: number;
+  offset_y?: number;
+  kind?: string;
+}
+
+/** One field a sync would change on an existing model. */
+export interface ModelFieldChange {
+  field: string;
+  from: unknown;
+  to: unknown;
+}
+
+export interface ModelSyncResult {
+  /** The feed the models came from. */
+  source: string;
+  /** Entries in the feed. */
+  total: number;
+  /** Nothing was written — this is a preview of what a sync would do. */
+  dryRun: boolean;
+  /** Names that don't exist locally yet and would simply be added. */
+  created: string[];
+  /**
+   * Existing models the feed would change, with the fields it would overwrite. Models that match
+   * the feed already are counted in `unchanged` instead, so this list is exactly "what you'd lose".
+   */
+  updated: { name: string; label: string; changes: ModelFieldChange[] }[];
+  /** Existing models the feed agrees with — rewriting them would be a no-op. */
+  unchanged: number;
+}
+
+/** The model columns a sync writes, mapped from a feed entry. */
+function toModelRow(external: ExternalModel) {
+  const bitDepth = external.bit_depth ?? 1;
+  return {
+    label: external.label ?? external.name ?? '',
+    width: external.width ?? 800,
+    height: external.height ?? 480,
+    description: external.description ?? null,
+    // colors follows the depth when the feed doesn't say (2, 4, 16, 256 …)
+    colors: external.colors ?? Math.min(256, 2 ** bitDepth),
+    bitDepth,
+    mimeType: external.mime_type ?? 'image/png',
+    scaleFactor: external.scale_factor ?? 1.0,
+    rotation: external.rotation ?? 0,
+    offsetX: external.offset_x ?? 0,
+    offsetY: external.offset_y ?? 0,
+    kind: external.kind ?? 'terminus',
+  };
+}
+
+/** Fields where the feed's value differs from what's stored — empty means the sync is a no-op. */
+function diffModel(existing: Record<string, unknown>, row: Record<string, unknown>): ModelFieldChange[] {
+  return Object.entries(row)
+    .filter(([field, to]) => {
+      const from = existing[field] ?? null;
+      // description is nullable; treat null and '' as the same absence
+      if (from === null && (to === null || to === '')) return false;
+      return from !== to;
+    })
+    .map(([field, to]) => ({ field, from: existing[field] ?? null, to }));
+}
+
 @Injectable()
 export class ModelsService {
   private readonly logger = new Logger(ModelsService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private config: ConfigService,
+  ) {}
 
   /**
    * Create a new device model
@@ -195,5 +280,109 @@ export class ModelsService {
 
     this.logger.log(`Model deleted: ${model.name}`);
     return { message: 'Model deleted successfully' };
+  }
+
+  /**
+   * Sync the model list from a Models API feed (TRMNL's by default, or MODELS_API_URL).
+   *
+   * User-triggered: Inker makes no outbound call until this runs. Models are matched by name —
+   * existing ones keep their id (so devices stay linked) and have their specs refreshed, new ones
+   * are created. Nothing is deleted, so models you added yourself survive a sync untouched, as
+   * long as their name isn't one the feed also publishes.
+   *
+   * `dryRun` performs the fetch and the comparison but writes nothing, so the UI can warn about
+   * exactly which of your models a sync would overwrite (and in which fields) before you commit.
+   */
+  async syncFromApi(dryRun = false): Promise<ModelSyncResult> {
+    const url = this.config.get<string>('models.apiUrl') || DEFAULT_MODELS_API_URL;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+    let body: unknown;
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json', 'User-Agent': 'Inker-E-Ink-Display' },
+      });
+      if (!response.ok) {
+        throw new BadRequestException(
+          `Models API returned ${response.status} ${response.statusText}`,
+        );
+      }
+      body = await response.json();
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      const reason = error instanceof Error ? error.message : 'unknown error';
+      this.logger.warn(`Model sync failed (${url}): ${reason}`);
+      throw new BadRequestException(`Could not reach the models API: ${reason}`);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    // TRMNL wraps the list in `data`; a bare array or Inker's own { data: { items } } shape is
+    // accepted too, so a self-hosted feed can be simpler.
+    const wrapped = body as { data?: unknown };
+    const inner = wrapped?.data;
+    const externalModels: ExternalModel[] = Array.isArray(body)
+      ? body
+      : Array.isArray(inner)
+        ? inner
+        : Array.isArray((inner as { items?: unknown })?.items)
+          ? ((inner as { items: ExternalModel[] }).items)
+          : [];
+
+    if (externalModels.length === 0) {
+      throw new BadRequestException('Models API returned no usable models');
+    }
+
+    const created: string[] = [];
+    const updated: ModelSyncResult['updated'] = [];
+    let unchanged = 0;
+
+    for (const external of externalModels) {
+      if (!external?.name) {
+        this.logger.warn('Skipping models API entry with no name');
+        continue;
+      }
+
+      const row = toModelRow(external);
+      const existing = await this.prisma.model.findUnique({
+        where: { name: external.name },
+      });
+
+      if (!existing) {
+        created.push(external.name);
+        if (!dryRun) {
+          await this.prisma.model.create({ data: { name: external.name, ...row } });
+        }
+        continue;
+      }
+
+      const changes = diffModel(existing as unknown as Record<string, unknown>, row);
+      if (changes.length === 0) {
+        unchanged++;
+        continue;
+      }
+
+      updated.push({ name: external.name, label: existing.label, changes });
+      if (!dryRun) {
+        await this.prisma.model.update({ where: { id: existing.id }, data: row });
+      }
+    }
+
+    this.logger.log(
+      `Model sync from ${url} ${dryRun ? 'preview' : 'complete'} — ` +
+        `${created.length} new, ${updated.length} changed, ${unchanged} already current`,
+    );
+
+    return {
+      source: url,
+      total: externalModels.length,
+      dryRun,
+      created,
+      updated,
+      unchanged,
+    };
   }
 }
