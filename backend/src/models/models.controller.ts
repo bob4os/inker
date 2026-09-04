@@ -6,14 +6,15 @@ import {
   Patch,
   Param,
   Delete,
-  UseGuards,
   ParseIntPipe,
+  Query,
 } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
   ApiResponse,
   ApiBearerAuth,
+  ApiQuery,
 } from '@nestjs/swagger';
 import { ModelsService } from './models.service';
 import { CreateModelDto } from './dto/create-model.dto';
@@ -40,6 +41,22 @@ export class ModelsController {
   @ApiResponse({ status: 200, description: 'List of models' })
   findAll() {
     return this.modelsService.findAll();
+  }
+
+  @Post('sync')
+  @ApiBearerAuth('access-token')
+  @ApiOperation({
+    summary: 'Sync device models from the TRMNL Models API (or MODELS_API_URL)',
+    description:
+      'Matches by name: unknown models are added, known ones are overwritten with the feed’s ' +
+      'values, and nothing is ever deleted. Pass dryRun=true to preview which existing models ' +
+      'would be overwritten (and in which fields) without writing anything.',
+  })
+  @ApiQuery({ name: 'dryRun', required: false, type: Boolean })
+  @ApiResponse({ status: 201, description: 'Sync result (or preview when dryRun=true)' })
+  @ApiResponse({ status: 400, description: 'Models API unreachable or returned nothing usable' })
+  sync(@Query('dryRun') dryRun?: string) {
+    return this.modelsService.syncFromApi(dryRun === 'true' || dryRun === '1');
   }
 
   @Get(':id')

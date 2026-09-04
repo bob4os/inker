@@ -35,6 +35,18 @@ import { CreateLogDto } from './log/dto/create-log.dto';
 import { ScreenRendererService } from '../screen-designer/services/screen-renderer.service';
 
 /**
+ * Panel bit depth requested by a device image URL: 2 (4 grays), 3 (8 grays), 4 (16 grays, TRMNL X)
+ * or 8 (full grayscale). Anything else — missing or malformed — is 1-bit black & white, the safe
+ * default every panel can show.
+ */
+const SUPPORTED_BIT_DEPTHS = [2, 3, 4, 8];
+
+function parseBitDepth(raw: string | undefined): number {
+  const value = parseInt(raw ?? '', 10);
+  return SUPPORTED_BIT_DEPTHS.includes(value) ? value : 1;
+}
+
+/**
  * Device API Controller
  * Handles all public API endpoints for device communication
  * Compatible with Ruby Inker API
@@ -632,8 +644,9 @@ export class ApiController {
     @Res() res: Response,
   ) {
     // Container: 'bmp' for TRMNL OG / DIY-kit firmware that rejects PNG (issue #31), otherwise PNG.
-    // bitDepth 4 → 16-level grayscale (TRMNL X), delivered as a compressed grayscale PNG by default.
-    const bitDepth = bitDepthRaw === '4' ? 4 : 1;
+    // bitDepth 2 → 4 grays, 4 → 16 grays (TRMNL X); grayscale is delivered as a compressed
+    // grayscale PNG by default.
+    const bitDepth = parseBitDepth(bitDepthRaw);
     const imageFormat: 'png' | 'bmp' = format === 'bmp' ? 'bmp' : 'png';
     const contentType = imageFormat === 'bmp' ? 'image/bmp' : 'image/png';
     try {
@@ -716,7 +729,7 @@ export class ApiController {
     @Res() res: Response,
   ) {
     try {
-      const bitDepth = bitDepthRaw === '4' ? 4 : 1;
+      const bitDepth = parseBitDepth(bitDepthRaw);
       const imageFormat: 'png' | 'bmp' = format === 'bmp' ? 'bmp' : 'png';
       const imageBuffer = await this.displayService.getUploadedScreenForDevice(id, imageFormat, bitDepth);
       res.set({

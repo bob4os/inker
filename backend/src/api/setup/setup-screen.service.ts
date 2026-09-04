@@ -1,9 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import * as sharpModule from 'sharp';
-// Handle both ESM and CJS imports for Bun compatibility
-const sharp = (sharpModule as any).default || sharpModule;
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { panelPixelsToPng, svgToPanelPixels } from '../../common/utils/panel-image.util';
 
 /**
  * Setup Screen Service
@@ -74,23 +72,10 @@ export class SetupScreenService implements OnModuleInit {
       // Create SVG with the welcome content
       const svg = this.createSetupScreenSvg(width, height);
 
-      // Convert SVG to e-ink optimized 1-bit PNG (same pipeline as designed screens)
-      const grayBuffer = await sharp(Buffer.from(svg))
-        .grayscale()
-        .normalise()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-
-      const dithered = this.applyFloydSteinbergDithering(
-        grayBuffer.data, grayBuffer.info.width, grayBuffer.info.height, 140,
-      );
-
-      await sharp(dithered, {
-        raw: { width: grayBuffer.info.width, height: grayBuffer.info.height, channels: 1 },
-      })
-        .toColorspace('b-w')
-        .png({ compressionLevel: 9 })
-        .toFile(this.setupScreenPath);
+      // Always 1-bit: this screen is shown at provisioning, before a device is linked to a model,
+      // and black text on white reads correctly on every panel depth.
+      const panel = await svgToPanelPixels(svg, 2);
+      await fs.writeFile(this.setupScreenPath, await panelPixelsToPng(panel));
 
       this.logger.log(`Setup screen saved to: ${this.setupScreenPath}`);
       return this.setupScreenPath;
@@ -210,43 +195,6 @@ export class SetupScreenService implements OnModuleInit {
    */
   isReady(): boolean {
     return this.setupScreenGenerated;
-  }
-
-  /**
-   * Floyd-Steinberg dithering for 1-bit e-ink output
-   */
-  private applyFloydSteinbergDithering(
-    data: Buffer, width: number, height: number, threshold: number,
-  ): Buffer {
-    const pixels = new Float32Array(data.length);
-    for (let i = 0; i < data.length; i++) {
-      const val = data[i];
-      if (val > 200) pixels[i] = 255;
-      else if (val < 55) pixels[i] = 0;
-      else pixels[i] = val;
-    }
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        const oldPixel = pixels[idx];
-        const newPixel = oldPixel > threshold ? 255 : 0;
-        pixels[idx] = newPixel;
-        const error = oldPixel - newPixel;
-        if (x + 1 < width) pixels[idx + 1] += error * 7 / 16;
-        if (y + 1 < height) {
-          if (x - 1 >= 0) pixels[(y + 1) * width + (x - 1)] += error * 3 / 16;
-          pixels[(y + 1) * width + x] += error * 5 / 16;
-          if (x + 1 < width) pixels[(y + 1) * width + (x + 1)] += error * 1 / 16;
-        }
-      }
-    }
-
-    const result = Buffer.alloc(data.length);
-    for (let i = 0; i < data.length; i++) {
-      result[i] = Math.max(0, Math.min(255, Math.round(pixels[i])));
-    }
-    return result;
   }
 
   /**

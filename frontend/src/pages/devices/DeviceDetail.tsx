@@ -10,6 +10,7 @@ import {
   OnlineStatus,
 } from '../../components/common';
 import { OnlineStatusBadge } from '../../components/common/OnlineStatus';
+import { depthLabel } from '../../utils/panelDepth';
 import { useApi, useMutation } from '../../hooks/useApi';
 import { deviceService, modelService } from '../../services/api';
 import { config } from '../../config';
@@ -388,13 +389,14 @@ export function DeviceDetail() {
                           <option value="" disabled>Select a model…</option>
                           {models.map((m) => (
                             <option key={m.id} value={m.id}>
-                              {m.label} · {m.mimeType === 'image/bmp' ? 'BMP (1-bit)' : 'PNG'} · {m.width}×{m.height}
+                              {m.label} · {m.mimeType === 'image/bmp' ? 'BMP' : 'PNG'} ({depthLabel(m.bitDepth)}) · {m.width}×{m.height}
                             </option>
                           ))}
                         </select>
                         <p className="mt-1.5 text-xs text-text-muted">
                           Choose a <span className="font-medium">BMP</span> model for TRMNL OG / DIY kits whose firmware shows
-                          {' '}“malformed request” with PNG screens.
+                          {' '}“malformed request” with PNG screens. The depth decides how many grays a screen is
+                          {' '}dithered down to — add or edit models in Settings.
                         </p>
                       </dd>
                     </div>

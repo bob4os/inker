@@ -12,6 +12,7 @@ import { SleepScreenService } from './sleep-screen.service';
 import { ScreenRendererService } from '../../screen-designer/services/screen-renderer.service';
 import { PluginsService } from '../../plugins/plugins.service';
 import { SetupService } from '../setup/setup.service';
+import { grayMasterPath } from '../../screens/services/image-processor.service';
 
 /**
  * Device metrics from headers
@@ -214,6 +215,7 @@ export class DisplayService {
 
     // Render descriptor derived from the device's model:
     //  - bitDepth 1  → 1-bit output (dithered). PNG for firmware 1.7.8, BMP for OG/DIY (issue #31).
+    //  - bitDepth 2  → 4 grays (dithered), for monochrome panels with grayscale support.
     //  - bitDepth 4  → 16-level grayscale (TRMNL X, 1872x1404), emitted as a compressed PNG.
     // Images are always sized to the device's native resolution so they fill the panel.
     // Container is driven purely by the model's mimeType; bitDepth governs grayscale vs 1-bit.
@@ -280,7 +282,7 @@ export class DisplayService {
       // Always render the default screen at the device's native resolution + depth so it fills
       // the panel (a fixed 800x480 image lands in a corner of a larger panel — TRMNL X).
       await this.defaultScreenService.ensureDefaultScreenForSize(devW, devH, imageFormat, bitDepth);
-      const defaultScreenUrl = this.defaultScreenService.getDefaultScreenUrlForSize(devW, devH, imageFormat);
+      const defaultScreenUrl = this.defaultScreenService.getDefaultScreenUrlForSize(devW, devH, imageFormat, bitDepth);
       const fullDefaultUrl = `${apiUrl}${defaultScreenUrl}?t=${Date.now()}`;
 
       // Get base64 if requested
@@ -338,7 +340,7 @@ export class DisplayService {
       // Always render the default screen at the device's native resolution + depth so it fills
       // the panel (a fixed 800x480 image lands in a corner of a larger panel — TRMNL X).
       await this.defaultScreenService.ensureDefaultScreenForSize(devW, devH, imageFormat, bitDepth);
-      const defaultScreenUrl = this.defaultScreenService.getDefaultScreenUrlForSize(devW, devH, imageFormat);
+      const defaultScreenUrl = this.defaultScreenService.getDefaultScreenUrlForSize(devW, devH, imageFormat, bitDepth);
       const fullDefaultUrl = `${apiUrl}${defaultScreenUrl}?t=${Date.now()}`;
 
       // Get base64 if requested
@@ -426,9 +428,9 @@ export class DisplayService {
     // Handle both regular screens and designed screens
     if (currentScreen.screen) {
       // Regular uploaded screen. A plain 1-bit PNG device gets the stored file directly; devices
-      // needing a converted image — 1-bit BMP (issue #31) or grayscale (TRMNL X) — fetch it via the
+      // needing a converted image — 1-bit BMP (issue #31) or any grayscale panel — fetch it via the
       // screen-image endpoint, which re-processes the upload to the right format/depth/resolution.
-      const needsConversion = isBmp || bitDepth >= 4;
+      const needsConversion = isBmp || bitDepth > 1;
       const convParams = `format=${imageFormat}${bitDepth > 1 ? `&bitDepth=${bitDepth}` : ''}&t=${Date.now()}`;
       const imageUrl = needsConversion
         ? `${apiUrl}/api/device-images/screen/${currentScreen.screen.id}?${convParams}`
@@ -475,7 +477,7 @@ export class DisplayService {
         macAddress: device.macAddress ? `XX:XX:XX:${device.macAddress.slice(-8)}` : 'Unknown',
         // Only add format for BMP devices so PNG render URLs stay unchanged (issue #31)
         ...(isBmp ? { format: 'bmp' } : {}),
-        // 4-bit grayscale panels (TRMNL X) request a matching color depth
+        // Grayscale panels (4-gray, TRMNL X) request a matching colour depth
         ...(bitDepth > 1 ? { bitDepth: String(bitDepth) } : {}),
       });
       const renderUrl = `${apiUrl}/api/device-images/design/${currentScreen.screenDesign.id}?${queryParams.toString()}`;
@@ -709,10 +711,14 @@ export class DisplayService {
   }
 
   /**
-   * Load an uploaded screen's stored image and convert it to a 1-bit BMP for
-   * TRMNL OG / DIY-kit firmware that rejects PNG (issue #31). Runs the same
-   * e-ink dithering pipeline as designed screens. Served by the
+   * Load an uploaded screen's stored image and convert it to the device's format: a 1-bit BMP for
+   * TRMNL OG / DIY-kit firmware that rejects PNG (issue #31), or a multi-level grayscale image for
+   * a grayscale panel. Runs the same e-ink pipeline as designed screens. Served by the
    * GET /api/device-images/screen/:id endpoint and used for inline base64.
+   *
+   * Grayscale panels start from the undithered grayscale master where one exists — the stored
+   * image itself is dithered to black & white, so re-processing it would yield 4 grays of which
+   * only 2 ever appear. Screens uploaded before masters existed fall back to the stored image.
    */
   async getUploadedScreenForDevice(
     screenId: number,
@@ -728,21 +734,58 @@ export class DisplayService {
     }
 
     const imagePath = path.join(process.cwd(), screen.imageUrl);
-    const input = await fs.readFile(imagePath);
+    const sourcePath = bitDepth > 1
+      ? await this.existingPath(grayMasterPath(imagePath), imagePath)
+      : imagePath;
+    const input = await fs.readFile(sourcePath);
     const width = screen.model?.width || 800;
     const height = screen.model?.height || 480;
 
     return this.screenRendererService.applyEinkProcessing(input, width, height, false, format, bitDepth);
   }
 
+  /** First of the two paths that exists on disk (falls back to `fallback` if neither does). */
+  private async existingPath(preferred: string, fallback: string): Promise<string> {
+    try {
+      await fs.access(preferred);
+      return preferred;
+    } catch {
+      return fallback;
+    }
+  }
+
   /**
-   * Get base64 encoded image (if requested by device)
-   * This would require actual image processing in production
+   * Read a stored screen image off disk as base64, for devices that ask for the image inline
+   * (BASE64 header) rather than fetching `image_url`.
+   *
+   * Only used on the path where the stored file is already in the device's format — devices
+   * needing a conversion go through `getUploadedScreenForDevice` instead. Returns undefined for
+   * anything unreadable or not local, which is safe: the response still carries `image_url`, so
+   * the device just fetches it the usual way.
    */
   private async getBase64Image(imageUrl: string): Promise<string | undefined> {
-    // TODO: Implement base64 encoding of image
-    // For now, return undefined and device will fetch via URL
-    return undefined;
+    if (!imageUrl || imageUrl.startsWith('http')) {
+      return undefined; // remote screens aren't ours to inline
+    }
+
+    // imageUrl is a server-relative upload path (e.g. /uploads/screens/processed_x.png). Resolve
+    // it and confirm it stayed inside uploads/ before reading.
+    const uploadsRoot = path.join(process.cwd(), 'uploads');
+    const imagePath = path.resolve(process.cwd(), `.${path.posix.normalize(imageUrl)}`);
+    if (!imagePath.startsWith(uploadsRoot + path.sep)) {
+      this.logger.warn(`Refusing to inline an image outside uploads/: ${imageUrl}`);
+      return undefined;
+    }
+
+    try {
+      const buffer = await fs.readFile(imagePath);
+      return buffer.toString('base64');
+    } catch (error) {
+      this.logger.warn(
+        `Could not inline ${imageUrl}: ${error instanceof Error ? error.message : 'unknown error'}`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -911,6 +954,7 @@ export class DisplayService {
     const device = await this.prisma.device.findUnique({
       where: { id: deviceId },
       include: {
+        model: true,
         playlist: {
           include: {
             items: {
@@ -953,6 +997,7 @@ export class DisplayService {
         device.width,
         device.height,
         device.sleepStopAt as string,
+        device.model?.bitDepth ?? 1,
       );
     }
 

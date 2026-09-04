@@ -18,7 +18,12 @@ const sharp = (sharpModule as any).default || sharpModule;
 import puppeteer, { Browser } from 'puppeteer';
 import QRCode from 'qrcode';
 import { validateUrlSafety, UrlSafetyOptions } from '../../common/utils/url-safety';
-import { encodeBmp1bit, encodeGray4Bmp, quantizeGray16 } from '../../common/utils/bmp1bit.util';
+import {
+  encodeBmpForLevels,
+  FULL_GRAY_LEVELS,
+  grayLevelsForBitDepth,
+} from '../../common/utils/bmp1bit.util';
+import { reduceToGrayLevels } from '../../common/utils/dither.util';
 import { SETTING_KEYS } from '../../settings/settings.service';
 import type { ScreenDesign, ScreenWidget, WidgetTemplate } from '@prisma/client';
 
@@ -384,14 +389,15 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
    * Apply e-ink processing to a sharp canvas
    * - Grayscale conversion
    * - Contrast normalization
-   * - Floyd-Steinberg dithering
+   * - Floyd-Steinberg dithering down to the panel's gray levels
    * - Optional color inversion (for device display)
-   * - 1-bit PNG output
+   * - PNG or BMP output at the panel's bit depth
    *
    * @param canvas - Sharp canvas with composited widgets
    * @param width - Original canvas width
    * @param height - Original canvas height
    * @param negate - If true, invert colors (required for TRMNL e-ink devices)
+   * @param bitDepth - Panel bit depth: 1 (black & white), 2 (4 grays), 3 (8 grays), 4 (16 grays)
    */
   async applyEinkProcessing(
     inputBuffer: Buffer,
@@ -402,7 +408,8 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
     bitDepth: number = 1,
   ): Promise<Buffer> {
     const MAX_SIZE = 90000; // Max 90KB for TRMNL devices
-    const threshold = 140; // Higher threshold favors white
+    const threshold = 140; // Higher threshold favors white (1-bit only)
+    const levels = grayLevelsForBitDepth(bitDepth);
 
     // First get grayscale raw pixels for Floyd-Steinberg dithering
     // Create fresh Sharp instance each time — Sharp pipelines are consumed after .toBuffer()
@@ -414,46 +421,44 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
 
     const { data, info } = grayBuffer;
 
-    // Grayscale path (TRMNL X, bitDepth 4 → 16 levels): full resolution, no 1-bit dithering,
-    // no downscale. Default output is a COMPRESSED 16-level grayscale PNG — small and widely
-    // accepted (an uncompressed 4-bit BMP of a 1872x1404 panel is ~1.3MB and can overwhelm the
-    // device). A 4-bit BMP variant is kept for firmware that requires an exact 4-bit container.
-    if (bitDepth >= 4) {
-      const quantized = quantizeGray16(data);
-      if (format === 'bmp') {
-        const gray4 = encodeGray4Bmp(quantized, info.width, info.height);
-        this.logger.debug(`E-ink processing complete: ${gray4.length} bytes, 4-bit grayscale BMP (${info.width}x${info.height})`);
-        return gray4;
-      }
-      const grayPng = await sharp(quantized, {
+    // Reduce to the panel's gray levels: dithered at 2-8 levels, posterized at 16, untouched at
+    // full 8-bit grayscale.
+    const panelPixels = reduceToGrayLevels(data, info.width, info.height, levels, { threshold });
+
+    // Grayscale panels (16 levels and up, e.g. TRMNL X) are served at full resolution and never
+    // downscaled. Their default output is a COMPRESSED grayscale PNG — small and widely accepted
+    // (an uncompressed 4-bit BMP of a 1872x1404 panel is ~1.3MB and can overwhelm the device); the
+    // BMP variant below is for firmware that requires one.
+    const isDeepGrayscale = levels >= 16;
+
+    // BMP path: emit a BMP at full device resolution for firmware that rejects PNG (TRMNL OG / DIY
+    // kits — issue #31). BMPs are a fixed size (800x480: ≈48KB at 1-bit, ≈192KB at 4 grays) and the
+    // device expects its exact native resolution, so we never scale them down.
+    if (format === 'bmp') {
+      const bmp = encodeBmpForLevels(panelPixels, info.width, info.height, levels);
+      this.logger.debug(
+        `E-ink processing complete: ${bmp.length} bytes, ${levels === 2 ? '1-bit' : `${Math.min(levels, 16)}-level grayscale`} BMP (${info.width}x${info.height})`,
+      );
+      return bmp;
+    }
+
+    if (isDeepGrayscale) {
+      const grayPng = await sharp(panelPixels, {
         raw: { width: info.width, height: info.height, channels: 1 },
       })
         .toColorspace('b-w')
         .png({ compressionLevel: 9 })
         .toBuffer();
-      this.logger.debug(`E-ink processing complete: ${grayPng.length} bytes, 16-level grayscale PNG (${info.width}x${info.height})`);
+      this.logger.debug(
+        `E-ink processing complete: ${grayPng.length} bytes, ${levels >= FULL_GRAY_LEVELS ? 'full' : levels}-level grayscale PNG (${info.width}x${info.height})`,
+      );
       return grayPng;
     }
 
-    // Apply Floyd-Steinberg dithering
-    const ditheredBuffer = this.applyFloydSteinbergDithering(data, info.width, info.height, threshold);
-
-    // BMP path: emit a 1-bit BMP at full device resolution for firmware that
-    // rejects PNG (TRMNL OG / DIY kits — issue #31). A 1-bit BMP is a fixed,
-    // small size (e.g. 800x480 ≈ 48KB, well under MAX_SIZE) and the device
-    // expects its exact native resolution, so we never scale it down.
-    if (format === 'bmp') {
-      const bmp = encodeBmp1bit(ditheredBuffer, info.width, info.height);
-      this.logger.debug(
-        `E-ink processing complete: ${bmp.length} bytes, 1-bit BMP (${info.width}x${info.height})`,
-      );
-      return bmp;
-    }
-
-    // Output as standard 8-bit grayscale PNG (color_type=0)
+    // Output as standard 8-bit grayscale PNG (color_type=0), content limited to the panel's grays.
     // Firmware 1.7.8 handles display color mapping — palette PNGs cause scrambled display
     // Sharp outputs 1-channel raw as RGB by default, so we convert to grayscale colorspace
-    let buffer = await sharp(ditheredBuffer, {
+    let buffer = await sharp(panelPixels, {
       raw: {
         width: info.width,
         height: info.height,
@@ -486,11 +491,12 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
         .raw()
         .toBuffer({ resolveWithObject: true });
 
-      const scaledDithered = this.applyFloydSteinbergDithering(
+      const scaledDithered = reduceToGrayLevels(
         scaledGray.data,
         scaledGray.info.width,
         scaledGray.info.height,
-        threshold,
+        levels,
+        { threshold },
       );
 
       buffer = await sharp(scaledDithered, {
@@ -506,68 +512,10 @@ export class ScreenRendererService implements OnModuleDestroy, OnModuleInit {
     }
 
     this.logger.debug(
-      `E-ink processing complete: ${buffer.length} bytes, grayscale dithered`,
+      `E-ink processing complete: ${buffer.length} bytes, ${levels}-level grayscale dithered`,
     );
 
     return buffer;
-  }
-
-  /**
-   * Apply Floyd-Steinberg dithering algorithm
-   * Converts grayscale image data to 1-bit with error diffusion
-   */
-  private applyFloydSteinbergDithering(
-    data: Buffer,
-    width: number,
-    height: number,
-    threshold: number,
-  ): Buffer {
-    const pixels = new Float32Array(data.length);
-
-    // Pre-dithering contrast enhancement
-    for (let i = 0; i < data.length; i++) {
-      const val = data[i];
-      if (val > 200) pixels[i] = 255;      // Near-white becomes pure white
-      else if (val < 55) pixels[i] = 0;    // Near-black becomes pure black
-      else pixels[i] = val;
-    }
-
-    // Floyd-Steinberg dithering
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        const oldPixel = pixels[idx];
-        const newPixel = oldPixel < threshold ? 0 : 255;
-        pixels[idx] = newPixel;
-        const error = oldPixel - newPixel;
-
-        // Error diffusion: 7/16, 3/16, 5/16, 1/16
-        // Clamp after each addition to prevent error accumulation artifacts
-        if (x + 1 < width) {
-          pixels[idx + 1] = Math.max(0, Math.min(255, pixels[idx + 1] + (error * 7) / 16));
-        }
-        if (x - 1 >= 0 && y + 1 < height) {
-          const i = (y + 1) * width + (x - 1);
-          pixels[i] = Math.max(0, Math.min(255, pixels[i] + (error * 3) / 16));
-        }
-        if (y + 1 < height) {
-          const i = (y + 1) * width + x;
-          pixels[i] = Math.max(0, Math.min(255, pixels[i] + (error * 5) / 16));
-        }
-        if (x + 1 < width && y + 1 < height) {
-          const i = (y + 1) * width + (x + 1);
-          pixels[i] = Math.max(0, Math.min(255, pixels[i] + (error * 1) / 16));
-        }
-      }
-    }
-
-    // Convert back to buffer
-    const output = Buffer.alloc(data.length);
-    for (let i = 0; i < pixels.length; i++) {
-      output[i] = Math.max(0, Math.min(255, Math.round(pixels[i])));
-    }
-
-    return output;
   }
 
   /**

@@ -608,7 +608,11 @@ export class ScreenDesignerController {
     const outputPath = path.join(widgetsUploadDir, outputFilename);
 
     try {
-      // Process image for e-ink: 1-bit (black/white) or 2-bit (4 grays), max 90KB
+      // Store the upload as an 8-bit grayscale PNG, max 90KB. Deliberately NOT dithered here:
+      // the same image can end up on panels of different depths (black & white, 4-gray, 16-gray),
+      // and the per-device render pipeline (applyEinkProcessing) dithers to whatever the target
+      // panel can show. Baking 1-bit pixels in at upload time would leave a 4-gray panel with
+      // nothing but black and white, and double-dithers the 1-bit ones.
       // Use in-memory buffer (no disk write before validation)
       const inputBuffer = file.buffer;
       let scale = 1.0;
@@ -628,7 +632,7 @@ export class ScreenDesignerController {
         // Convert to grayscale and normalize
         // IMPORTANT: flatten() converts transparent backgrounds to white
         // Without this, transparent pixels become black after processing
-        const grayBuffer = await sharp(inputBuffer)
+        buffer = await sharp(inputBuffer)
           .flatten({ background: { r: 255, g: 255, b: 255 } })
           .resize(newWidth, newHeight, {
             fit: 'inside',
@@ -636,56 +640,6 @@ export class ScreenDesignerController {
           })
           .grayscale()
           .normalise()
-          .raw()
-          .toBuffer({ resolveWithObject: true });
-
-        // Apply Floyd-Steinberg dithering for 1-bit output
-        const { data, info } = grayBuffer;
-        const pixels = new Float32Array(data.length);
-        for (let i = 0; i < data.length; i++) {
-          pixels[i] = data[i];
-        }
-
-        // Floyd-Steinberg dithering to black/white (1-bit)
-        const threshold = 128;
-        for (let y = 0; y < info.height; y++) {
-          for (let x = 0; x < info.width; x++) {
-            const idx = y * info.width + x;
-            const oldPixel = pixels[idx];
-            const newPixel = oldPixel < threshold ? 0 : 255;
-            pixels[idx] = newPixel;
-            const error = oldPixel - newPixel;
-
-            if (x + 1 < info.width) {
-              pixels[idx + 1] += (error * 7) / 16;
-            }
-            if (x - 1 >= 0 && y + 1 < info.height) {
-              pixels[(y + 1) * info.width + (x - 1)] += (error * 3) / 16;
-            }
-            if (y + 1 < info.height) {
-              pixels[(y + 1) * info.width + x] += (error * 5) / 16;
-            }
-            if (x + 1 < info.width && y + 1 < info.height) {
-              pixels[(y + 1) * info.width + (x + 1)] += (error * 1) / 16;
-            }
-          }
-        }
-
-        // Convert back to buffer
-        const output = Buffer.alloc(data.length);
-        for (let i = 0; i < pixels.length; i++) {
-          output[i] = Math.max(0, Math.min(255, Math.round(pixels[i])));
-        }
-
-        // Create grayscale PNG (dithered to black/white values)
-        buffer = await sharp(output, {
-          raw: {
-            width: info.width,
-            height: info.height,
-            channels: 1,
-          },
-        })
-          .toColorspace('b-w')
           .png({ compressionLevel: 9 })
           .toBuffer();
 
@@ -718,71 +672,6 @@ export class ScreenDesignerController {
     }
   }
 
-  /**
-   * Apply Floyd-Steinberg dithering to convert image to 1-bit (black/white)
-   * This is the same algorithm used in e-ink processing for optimal display
-   */
-  private async applyFloydSteinbergDithering(
-    inputBuffer: Buffer,
-    width: number,
-    height: number,
-  ): Promise<Buffer> {
-    // Get raw grayscale pixel data
-    const { data, info } = await sharp(inputBuffer)
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    // Create float array for error diffusion
-    const pixels = new Float32Array(data.length);
-    for (let i = 0; i < data.length; i++) {
-      pixels[i] = data[i];
-    }
-
-    // Floyd-Steinberg dithering to black/white
-    const threshold = 128;
-    for (let y = 0; y < info.height; y++) {
-      for (let x = 0; x < info.width; x++) {
-        const idx = y * info.width + x;
-        const oldPixel = pixels[idx];
-        const newPixel = oldPixel < threshold ? 0 : 255;
-        pixels[idx] = newPixel;
-        const error = oldPixel - newPixel;
-
-        // Distribute error to neighboring pixels
-        if (x + 1 < info.width) {
-          pixels[idx + 1] += (error * 7) / 16;
-        }
-        if (x - 1 >= 0 && y + 1 < info.height) {
-          pixels[(y + 1) * info.width + (x - 1)] += (error * 3) / 16;
-        }
-        if (y + 1 < info.height) {
-          pixels[(y + 1) * info.width + x] += (error * 5) / 16;
-        }
-        if (x + 1 < info.width && y + 1 < info.height) {
-          pixels[(y + 1) * info.width + (x + 1)] += (error * 1) / 16;
-        }
-      }
-    }
-
-    // Convert back to buffer
-    const output = Buffer.alloc(data.length);
-    for (let i = 0; i < pixels.length; i++) {
-      output[i] = Math.max(0, Math.min(255, Math.round(pixels[i])));
-    }
-
-    // Create PNG from raw grayscale data
-    return sharp(output, {
-      raw: {
-        width: info.width,
-        height: info.height,
-        channels: 1,
-      },
-    })
-      .toColorspace('b-w')
-      .png({ compressionLevel: 9 })
-      .toBuffer();
-  }
 }
 
 // ========================

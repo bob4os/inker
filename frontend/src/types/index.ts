@@ -16,7 +16,7 @@ export interface GitHubTokenTestResult {
 }
 
 // Device types
-/** A device model / display profile — dimensions + image format (PNG vs 1-bit BMP) */
+/** A device model / display profile — dimensions, image format (PNG vs BMP) and panel depth */
 export interface DeviceModel {
   id: number;
   /** Machine name, e.g. "og_png" or "og_bmp" */
@@ -25,8 +25,61 @@ export interface DeviceModel {
   label: string;
   width: number;
   height: number;
+  description?: string | null;
   /** "image/png" or "image/bmp" — BMP is for TRMNL OG / DIY-kit firmware (issue #31) */
   mimeType: string;
+  /** Gray levels the panel can show: 2, 4, 8 or 16. Kept in step with bitDepth. */
+  colors?: number;
+  /** Panel bit depth: 1 = black & white, 2 = 4 grays, 3 = 8 grays, 4 = 16 grays (TRMNL X) */
+  bitDepth?: number;
+  rotation?: number;
+  offsetX?: number;
+  offsetY?: number;
+  kind?: string;
+  scaleFactor?: number;
+  _count?: {
+    devices: number;
+    screens: number;
+  };
+}
+
+/** One field a model sync would overwrite on an existing model */
+export interface ModelFieldChange {
+  field: string;
+  from: unknown;
+  to: unknown;
+}
+
+/** Result of a model sync — or, with dryRun, a preview of what one would do */
+export interface ModelSyncResult {
+  /** Feed the models came from */
+  source: string;
+  /** Entries in the feed */
+  total: number;
+  /** True when nothing was written */
+  dryRun: boolean;
+  /** Names that would simply be added */
+  created: string[];
+  /** Existing models the feed would overwrite, and the fields it would change */
+  updated: { name: string; label: string; changes: ModelFieldChange[] }[];
+  /** Existing models that already match the feed */
+  unchanged: number;
+}
+
+/** Editable fields of a device model (create + update share the same shape) */
+export interface DeviceModelFormData {
+  name: string;
+  label: string;
+  width: number;
+  height: number;
+  description?: string;
+  mimeType: string;
+  colors?: number;
+  bitDepth: number;
+  rotation?: number;
+  offsetX?: number;
+  offsetY?: number;
+  scaleFactor?: number;
 }
 
 export interface Device {

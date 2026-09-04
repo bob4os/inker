@@ -1,9 +1,17 @@
-import { describe, it, expect, beforeEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterAll } from 'bun:test';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { DisplayService } from './display.service';
 import { createMockPrisma } from '../../test/mocks/prisma.mock';
 import { createMock } from '../../test/mocks/helpers';
 
 describe('DisplayService', () => {
+  /** Real files a test had to put on disk; removed once the suite finishes. */
+  const tempFiles: string[] = [];
+  afterAll(async () => {
+    await Promise.all(tempFiles.map((f) => fs.unlink(f).catch(() => {})));
+  });
+
   let service: DisplayService;
   let mockPrisma: ReturnType<typeof createMockPrisma>;
   let mockConfig: any;
@@ -29,8 +37,14 @@ describe('DisplayService', () => {
       getDefaultScreenBmpBuffer: createMock().mockResolvedValue(Buffer.from('BM')),
       ensureDefaultScreenBmpExists: createMock().mockResolvedValue(undefined),
       ensureDefaultScreenForSize: createMock().mockResolvedValue(undefined),
+      // Mirrors the real naming: grayscale panels get a depth suffix so two models sharing a
+      // resolution but differing in depth don't collide on one cached file.
       getDefaultScreenUrlForSize: createMock().mockImplementation(
-        (w: number, h: number, fmt: string) => `/assets/default-screen-${w}x${h}.${fmt}`,
+        (w: number, h: number, fmt: string, bitDepth = 1) => {
+          const levels = bitDepth <= 1 ? 2 : Math.min(256, 2 ** bitDepth);
+          const depth = levels === 2 ? '' : `-${levels}gray`;
+          return `/assets/default-screen-${w}x${h}${depth}.${fmt}`;
+        },
       ),
       getDefaultScreenBase64ForSize: createMock().mockResolvedValue('base64sized'),
     };
@@ -502,10 +516,40 @@ describe('DisplayService', () => {
       mockPrisma.firmware.findFirst.mockResolvedValue(null);
 
       const result = await service.getDisplayContent('test-key');
-      expect(result.image_url).toContain('/assets/default-screen-1872x1404.png');
+      expect(result.image_url).toContain('/assets/default-screen-1872x1404-16gray.png');
       expect(result.filename).toMatch(/\.png$/);
       const [w, h, fmt, depth] = mockDefaultScreenService.ensureDefaultScreenForSize.calls[0];
       expect([w, h, fmt, depth]).toEqual([1872, 1404, 'png', 4]);
+    });
+
+    it('serves a device-sized 4-gray default screen for a 2-bit panel', async () => {
+      mockPrisma.device.findFirst.mockResolvedValue({
+        id: 1, name: 'Gray', playlist: null, refreshRate: 900, refreshPending: false,
+        width: 800, height: 480,
+        model: { mimeType: 'image/png', bitDepth: 2, width: 800, height: 480 },
+      });
+      mockPrisma.device.update.mockResolvedValue({ id: 1, battery: null, wifi: null });
+      mockPrisma.firmware.findFirst.mockResolvedValue(null);
+
+      const result = await service.getDisplayContent('test-key');
+      // Depth is part of the cache name, so this never collides with the 1-bit 800x480 screen
+      expect(result.image_url).toContain('/assets/default-screen-800x480-4gray.png');
+      const [w, h, fmt, depth] = mockDefaultScreenService.ensureDefaultScreenForSize.calls[0];
+      expect([w, h, fmt, depth]).toEqual([800, 480, 'png', 2]);
+    });
+
+    it('appends bitDepth=2 to the designed-screen render URL for a 4-gray panel', async () => {
+      mockPrisma.device.findFirst.mockResolvedValue({
+        id: 1, name: 'Gray', refreshRate: 900, refreshPending: false, width: 800, height: 480,
+        model: { mimeType: 'image/png', bitDepth: 2, width: 800, height: 480 },
+        playlist: { items: [{ duration: 60, screenDesign: { id: 9, name: 'D' } }] },
+      });
+      mockPrisma.device.update.mockResolvedValue({ id: 1, battery: null, wifi: null });
+      mockPrisma.firmware.findFirst.mockResolvedValue(null);
+
+      const result = await service.getDisplayContent('test-key');
+      expect(result.image_url).toContain('/api/device-images/design/9');
+      expect(result.image_url).toContain('bitDepth=2');
     });
 
     it('appends bitDepth=4 (as PNG) to the designed-screen render URL for a TRMNL X', async () => {
@@ -566,6 +610,86 @@ describe('DisplayService', () => {
       expect(result.image_url).toContain('/api/device-images/screen/9');
       expect(result.image_url).toContain('format=bmp');
       expect(result.filename).toMatch(/\.bmp$/);
+    });
+
+    it('inlines a stored screen as base64 when the device asks for it', async () => {
+      // A plain 1-bit PNG device needs no conversion, so the stored file is served as-is —
+      // this is the path that used to silently return no image_data at all.
+      const uploadsDir = path.join(process.cwd(), 'uploads', 'screens');
+      const filename = `test-inline-${Date.now()}.png`;
+      await fs.mkdir(uploadsDir, { recursive: true });
+      await fs.writeFile(path.join(uploadsDir, filename), Buffer.from('fake-png-bytes'));
+      tempFiles.push(path.join(uploadsDir, filename));
+
+      mockPrisma.device.findFirst.mockResolvedValue({
+        id: 1, name: 'OG', refreshRate: 900, refreshPending: false, width: 800, height: 480,
+        model: { mimeType: 'image/png', bitDepth: 1, width: 800, height: 480 },
+        playlist: {
+          items: [{
+            duration: 60,
+            screen: { id: 9, name: 'S', imageUrl: `/uploads/screens/${filename}` },
+          }],
+        },
+      });
+      mockPrisma.device.update.mockResolvedValue({ id: 1, battery: null, wifi: null });
+      mockPrisma.firmware.findFirst.mockResolvedValue(null);
+
+      const result = await service.getDisplayContent('test-key', true);
+      expect(result.image_data).toBe(Buffer.from('fake-png-bytes').toString('base64'));
+    });
+
+    it('leaves image_data undefined when the stored file is missing', async () => {
+      mockPrisma.device.findFirst.mockResolvedValue({
+        id: 1, name: 'OG', refreshRate: 900, refreshPending: false, width: 800, height: 480,
+        model: { mimeType: 'image/png', bitDepth: 1, width: 800, height: 480 },
+        playlist: {
+          items: [{
+            duration: 60,
+            screen: { id: 9, name: 'S', imageUrl: '/uploads/screens/does-not-exist.png' },
+          }],
+        },
+      });
+      mockPrisma.device.update.mockResolvedValue({ id: 1, battery: null, wifi: null });
+      mockPrisma.firmware.findFirst.mockResolvedValue(null);
+
+      // The device still gets image_url, so a missing file degrades instead of failing the poll
+      const result = await service.getDisplayContent('test-key', true);
+      expect(result.image_data).toBeUndefined();
+      expect(result.image_url).toBeTruthy();
+    });
+
+    it('refuses to inline a path that escapes the uploads directory', async () => {
+      mockPrisma.device.findFirst.mockResolvedValue({
+        id: 1, name: 'OG', refreshRate: 900, refreshPending: false, width: 800, height: 480,
+        model: { mimeType: 'image/png', bitDepth: 1, width: 800, height: 480 },
+        playlist: {
+          items: [{
+            duration: 60,
+            screen: { id: 9, name: 'S', imageUrl: '/uploads/../../../../etc/passwd' },
+          }],
+        },
+      });
+      mockPrisma.device.update.mockResolvedValue({ id: 1, battery: null, wifi: null });
+      mockPrisma.firmware.findFirst.mockResolvedValue(null);
+
+      const result = await service.getDisplayContent('test-key', true);
+      expect(result.image_data).toBeUndefined();
+    });
+
+    it('routes uploaded screens through the conversion endpoint for grayscale panels', async () => {
+      // The stored upload is dithered to black & white; a 4-gray panel needs it re-rendered from
+      // the grayscale master, so it must not be served straight off /uploads.
+      mockPrisma.device.findFirst.mockResolvedValue({
+        id: 1, name: 'Gray', refreshRate: 900, refreshPending: false, width: 800, height: 480,
+        model: { mimeType: 'image/png', bitDepth: 2, width: 800, height: 480 },
+        playlist: { items: [{ duration: 60, screen: { id: 9, name: 'S', imageUrl: '/uploads/s.png' } }] },
+      });
+      mockPrisma.device.update.mockResolvedValue({ id: 1, battery: null, wifi: null });
+      mockPrisma.firmware.findFirst.mockResolvedValue(null);
+
+      const result = await service.getDisplayContent('test-key');
+      expect(result.image_url).toContain('/api/device-images/screen/9');
+      expect(result.image_url).toContain('bitDepth=2');
     });
   });
 

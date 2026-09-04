@@ -1,5 +1,16 @@
 import { describe, it, expect } from 'bun:test';
-import { encodeBmp1bit, encodeGray4Bmp, gray8ToLevel4 } from './bmp1bit.util';
+import {
+  bmpGrayLevels,
+  encodeBmp1bit,
+  encodeBmpForLevels,
+  encodeGray4Bmp,
+  encodeGrayBmp,
+  gray8ToLevel4,
+  grayLevelsForBitDepth,
+  grayToLevel,
+  levelToGray8,
+  quantizeGrayLevels,
+} from './bmp1bit.util';
 
 /** Minimal helper: read the header fields we care about from a BMP buffer. */
 function parseHeader(buf: Buffer) {
@@ -151,6 +162,102 @@ describe('bmp1bit.util', () => {
       const levels = new Set<number>();
       for (let x = 0; x < w; x++) levels.add(readLevel4(bmp, w, h, x, 0));
       expect(levels.size).toBeGreaterThan(2);
+    });
+  });
+
+  describe('grayLevelsForBitDepth', () => {
+    it('maps a panel bit depth to its gray levels', () => {
+      expect(grayLevelsForBitDepth(1)).toBe(2);
+      expect(grayLevelsForBitDepth(2)).toBe(4);
+      expect(grayLevelsForBitDepth(3)).toBe(8);
+      expect(grayLevelsForBitDepth(4)).toBe(16);
+      expect(grayLevelsForBitDepth(8)).toBe(256);
+    });
+
+    it('caps BMP output at the 4bpp container ceiling', () => {
+      expect(bmpGrayLevels(4)).toBe(4);
+      expect(bmpGrayLevels(16)).toBe(16);
+      expect(bmpGrayLevels(256)).toBe(16);
+    });
+  });
+
+  describe('gray level maths', () => {
+    it('spaces 4 levels evenly across 0-255', () => {
+      expect([0, 1, 2, 3].map((i) => levelToGray8(i, 4))).toEqual([0, 85, 170, 255]);
+    });
+
+    it('agrees with the 16-level 0x11 steps at the shared levels', () => {
+      expect([0, 5, 10, 15].map((i) => levelToGray8(i, 16))).toEqual([0, 85, 170, 255]);
+    });
+
+    it('snaps a grayscale value to the nearest of 4 levels', () => {
+      expect([0, 60, 90, 200, 255].map((v) => grayToLevel(v, 4))).toEqual([0, 1, 1, 2, 3]);
+    });
+
+    it('posterizes a buffer to exactly the level grays', () => {
+      const gradient = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+      const posterized = quantizeGrayLevels(gradient, 4);
+      expect([...new Set(posterized)].sort((a, b) => a - b)).toEqual([0, 85, 170, 255]);
+    });
+  });
+
+  describe('encodeGrayBmp at 4 levels (2-bit panels)', () => {
+    it('produces a 4bpp BMP with a 4-entry palette', () => {
+      const w = 800, h = 480;
+      const bmp = encodeGrayBmp(Buffer.alloc(w * h, 128), w, h, 4);
+      const head = parseHeader(bmp);
+      expect(head.magic).toBe('BM');
+      expect(head.bitCount).toBe(4); // BMP has no standard 2bpp form
+      expect(head.compression).toBe(0);
+      expect(head.colorsUsed).toBe(4);
+      expect(head.pixelOffset).toBe(70); // 14 + 40 + 4*4
+      // ceil(800/2)=400 bytes/row, already 4-byte aligned
+      expect(bmp.length).toBe(70 + 400 * h);
+    });
+
+    it('has a 4-entry black / dark / light / white palette', () => {
+      const bmp = encodeGrayBmp(Buffer.alloc(4, 0), 2, 2, 4);
+      [0, 85, 170, 255].forEach((v, i) => {
+        const off = 54 + i * 4;
+        expect(bmp[off]).toBe(v);     // B
+        expect(bmp[off + 1]).toBe(v); // G
+        expect(bmp[off + 2]).toBe(v); // R
+      });
+    });
+
+    it('stores each pixel as its own gray level index', () => {
+      const bmp = encodeGrayBmp(Buffer.from([0, 85, 170, 255]), 4, 1, 4);
+      expect([0, 1, 2, 3].map((x) => readLevel4(bmp, 4, 1, x, 0))).toEqual([0, 1, 2, 3]);
+    });
+
+    it('stores rows bottom-up', () => {
+      const gray = Buffer.concat([Buffer.alloc(4, 255), Buffer.alloc(4, 0)]);
+      const bmp = encodeGrayBmp(gray, 4, 2, 4);
+      expect(readLevel4(bmp, 4, 2, 0, 0)).toBe(3); // top row white
+      expect(readLevel4(bmp, 4, 2, 0, 1)).toBe(0); // bottom row black
+    });
+
+    it('rejects a level count the 4bpp container cannot hold', () => {
+      expect(() => encodeGrayBmp(Buffer.alloc(4), 2, 2, 17)).toThrow();
+      expect(() => encodeGrayBmp(Buffer.alloc(4), 2, 2, 1)).toThrow();
+    });
+  });
+
+  describe('encodeBmpForLevels', () => {
+    const gray = Buffer.alloc(64, 128);
+
+    it('emits a 1-bit BMP for black & white panels', () => {
+      expect(parseHeader(encodeBmpForLevels(gray, 8, 8, 2)).bitCount).toBe(1);
+    });
+
+    it('emits a 4bpp BMP for grayscale panels', () => {
+      const head = parseHeader(encodeBmpForLevels(gray, 8, 8, 4));
+      expect(head.bitCount).toBe(4);
+      expect(head.colorsUsed).toBe(4);
+    });
+
+    it('caps a deeper panel at the container ceiling rather than failing', () => {
+      expect(parseHeader(encodeBmpForLevels(gray, 8, 8, 256)).colorsUsed).toBe(16);
     });
   });
 });

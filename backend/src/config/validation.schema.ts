@@ -9,6 +9,11 @@ export const validationSchema = Joi.object({
   // Database
   DATABASE_URL: Joi.string().required(),
 
+  // External APIs
+  // Feed behind "Sync from TRMNL" in Settings → Display Models. Unset uses TRMNL's public
+  // models API; nothing is fetched until a sync is actually triggered.
+  MODELS_API_URL: Joi.string().uri().allow('').optional(),
+
   // Rate limiting
   THROTTLE_TTL: Joi.number().default(60),
   THROTTLE_LIMIT: Joi.number().default(100),

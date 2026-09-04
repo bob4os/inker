@@ -331,32 +331,50 @@ async function main() {
     },
   ];
 
-  for (const modelData of models) {
-    await prisma.model.upsert({
-      where: { name: modelData.name },
-      update: {},
-      create: modelData,
-    });
+  // Device models are seeded ONCE, on a database that has none.
+  //
+  // They are user-managed reference data: Settings → Display Models can add, edit and delete them,
+  // and "Sync from TRMNL" can pull the full published list. Re-seeding on every boot would undo a
+  // deletion on the next container restart, which is worse than an existing install not picking up
+  // a model we happen to ship later — that install can add or sync it in a few clicks.
+  //
+  // A database with zero models re-seeds, so deleting everything still leaves devices assignable.
+  const existingModels = await prisma.model.count();
+  if (existingModels > 0) {
+    console.log(`⏭️  ${existingModels} device models already present — leaving them untouched`);
+  } else {
+    for (const modelData of models) {
+      await prisma.model.create({ data: modelData });
+    }
+    console.log(`✅ Created ${models.length} device models`);
   }
-
-  console.log(`✅ Created ${models.length} device models`);
 
   // No firmware is seeded. Inker does not host or distribute device firmware, so a
   // placeholder row would only produce a misleading "update available" note. Admins
   // can record a real latest version via the /firmware API if they want the note.
 
-  // Seed widget templates
+  // Widget templates, unlike models, ARE seeded on every boot.
+  //
+  // They're application data, not user data: there is no UI to create one, existing screen designs
+  // reference them by id, and a widget shipped in a new image only becomes available to existing
+  // installs because this runs on upgrades too. `update: {}` keeps it additive — a template that
+  // already exists is never modified.
   console.log('Seeding widget templates...');
-  let widgetTemplatesCreated = 0;
+  let widgetTemplatesAdded = 0;
   for (const template of WIDGET_TEMPLATES) {
-    await prisma.widgetTemplate.upsert({
+    const existing = await prisma.widgetTemplate.findUnique({
       where: { name: template.name },
-      update: {},
-      create: template,
     });
-    widgetTemplatesCreated++;
+    if (!existing) {
+      await prisma.widgetTemplate.create({ data: template });
+      widgetTemplatesAdded++;
+    }
   }
-  console.log(`✅ Created ${widgetTemplatesCreated} widget templates`);
+  console.log(
+    widgetTemplatesAdded > 0
+      ? `✅ Added ${widgetTemplatesAdded} widget template(s) (${WIDGET_TEMPLATES.length} total)`
+      : `✅ All ${WIDGET_TEMPLATES.length} widget templates already present`,
+  );
 
   console.log('');
   console.log('🎉 Database seeding completed!');

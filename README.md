@@ -19,6 +19,8 @@ Support project that uses inker:
 - **Custom Widgets** — Connect to any JSON API or RSS feed (including local network sources), JavaScript transformations, grid layouts with word-wrapped cells
 - **Plugins** — Grafana panel integration with dashboard picker, live preview, and section grid compositing. More homelab-native plugins coming soon!
 - **TRMNL OG & X** — Automatic model detection; full **TRMNL X** support (10.3″, 1872×1404, 16-level grayscale) alongside the 7.5″ OG (800×480, 1-bit)
+- **Grayscale panels** — Monochrome displays with **4 grays** (2-bit), 8 grays (3-bit) or full 8-bit grayscale, with Floyd-Steinberg error diffusion at the panel's exact level count. PNG or 4bpp grayscale BMP for firmware that needs it
+- **Display Models** — Add, edit and delete display models in Settings (resolution, image format, panel depth), or sync the full list from TRMNL's public models API — with a preview of exactly which of your models a sync would overwrite before it runs
 - **Playlists** — Rotate multiple screens on devices automatically, with optional **TRMNL X touch-bar** tap-to-advance (per playlist)
 - **Device Management** — Auto-provisioning, firmware support, real-time status, logs
 - **BYOD Support** — Register any e-ink device manually with custom screen resolution
@@ -96,6 +98,7 @@ Open **http://your-server-ip** and log in with PIN `1111`.
 | `TZ` | Timezone for widgets | `UTC` |
 | `INKER_PORT` | External port (for custom port mapping, e.g. `INKER_PORT=800`) | `80` |
 | `CORS_ORIGINS` | Allowed CORS origins (comma-separated, or `*` for all) | same-origin |
+| `MODELS_API_URL` | Feed used by **Sync from TRMNL** in Settings → Display Models | `https://usetrmnl.com/api/models` |
 
 Pass with `-e`:
 ```bash
