@@ -148,6 +148,7 @@ model DataSource {
   url             String    // API endpoint or RSS feed URL
   method          String    @default("GET") // HTTP method for JSON APIs
   headers         Json?     // Custom headers (e.g., API keys)
+  body            String?   // Request body sent with POST requests (raw string, JSON by default)
   refreshInterval Int       @default(300) @map("refresh_interval") // Seconds between fetches
   jsonPath        String?   @map("json_path") // JSONPath expression to extract data
   isActive        Boolean   @default(true) @map("is_active")

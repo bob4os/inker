@@ -58,6 +58,14 @@ export class UpdateDataSourceDto {
   headers?: Record<string, string>;
 
   @ApiPropertyOptional({
+    example: '{"city":"Berlin","units":"metric"}',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10000)
+  body?: string;
+
+  @ApiPropertyOptional({
     example: 300,
   })
   @IsOptional()

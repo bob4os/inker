@@ -215,6 +215,7 @@ export interface DataSource {
   url: string;
   method: 'GET' | 'POST';
   headers?: Record<string, string>;
+  body?: string;
   refreshInterval: number;
   jsonPath?: string;
   isActive: boolean;
@@ -235,6 +236,7 @@ export interface DataSourceFormData {
   url: string;
   method?: 'GET' | 'POST';
   headers?: Record<string, string>;
+  body?: string;
   refreshInterval?: number;
   jsonPath?: string;
   isActive?: boolean;
@@ -268,6 +270,7 @@ export interface TestUrlRequest {
   type: 'json' | 'rss';
   method?: string;
   headers?: Record<string, string>;
+  body?: string;
   dataSourceId?: number;
 }
 

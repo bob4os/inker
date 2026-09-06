@@ -56,6 +56,7 @@ export class DataSourcesService {
         url: createDataSourceDto.url,
         method: createDataSourceDto.method || 'GET',
         headers: (createDataSourceDto.headers || undefined) as object | undefined,
+        body: createDataSourceDto.body,
         refreshInterval: createDataSourceDto.refreshInterval || 300,
         jsonPath: createDataSourceDto.jsonPath,
         isActive: createDataSourceDto.isActive ?? true,
@@ -167,6 +168,7 @@ export class DataSourcesService {
         url: dto.url,
         method: dto.method || 'GET',
         headers,
+        body: dto.body,
       });
 
       // Extract all field paths with types and sample values
@@ -411,6 +413,7 @@ export class DataSourcesService {
         url: updateDataSourceDto.url,
         method: updateDataSourceDto.method,
         headers: headers as any,
+        body: updateDataSourceDto.body,
         refreshInterval: updateDataSourceDto.refreshInterval,
         jsonPath: updateDataSourceDto.jsonPath,
         isActive: updateDataSourceDto.isActive,
@@ -579,6 +582,7 @@ export class DataSourcesService {
     url: string;
     method: string;
     headers?: object | null;
+    body?: string | null;
     jsonPath?: string | null;
   }): Promise<unknown> {
     const safetyOptions = await this.getUrlSafetyOptions();
@@ -590,7 +594,14 @@ export class DataSourcesService {
     const headers = (dataSource.headers as Record<string, string>) || {};
 
     if (dataSource.type === 'json') {
-      return this.fetchJson(dataSource.url, dataSource.method, headers, dataSource.jsonPath, safetyOptions);
+      return this.fetchJson(
+        dataSource.url,
+        dataSource.method,
+        headers,
+        dataSource.body,
+        dataSource.jsonPath,
+        safetyOptions,
+      );
     } else if (dataSource.type === 'rss') {
       return this.fetchRss(dataSource.url, headers, safetyOptions);
     }
@@ -634,20 +645,48 @@ export class DataSourcesService {
   }
 
   /**
+   * Build the axios payload for a JSON request.
+   * Bodies only apply to POST — the string is sent verbatim so any content type
+   * works, and Content-Type defaults to JSON unless the user set one themselves.
+   */
+  buildRequestBody(
+    method: string,
+    headers: Record<string, string>,
+    body?: string | null,
+  ): { data?: string; headers: Record<string, string> } {
+    if (method !== 'POST' || !body || !body.trim()) {
+      return { headers };
+    }
+
+    const hasContentType = Object.keys(headers).some(
+      key => key.toLowerCase() === 'content-type',
+    );
+
+    return {
+      data: body,
+      headers: hasContentType ? headers : { ...headers, 'Content-Type': 'application/json' },
+    };
+  }
+
+  /**
    * Fetch JSON data from an API
    */
   private async fetchJson(
     url: string,
     method: string,
     headers: Record<string, string>,
+    body?: string | null,
     jsonPath?: string | null,
     safetyOptions?: UrlSafetyOptions,
   ): Promise<unknown> {
+    const request = this.buildRequestBody(method, headers, body);
+
     // Use DNS-pinning agents to prevent DNS rebinding attacks (TOCTOU)
     const response = await axios({
       method: method as 'GET' | 'POST',
       url,
-      headers,
+      headers: request.headers,
+      ...(request.data !== undefined ? { data: request.data } : {}),
       timeout: 30000,
       maxContentLength: 5 * 1024 * 1024,
       maxBodyLength: 5 * 1024 * 1024,

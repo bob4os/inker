@@ -26,6 +26,12 @@ export class TestUrlDto {
   @IsObject()
   headers?: Record<string, string>;
 
+  @ApiPropertyOptional({ description: 'Request body for POST requests (sent verbatim, JSON by default)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10000)
+  body?: string;
+
   @ApiPropertyOptional({ description: 'Existing data source ID — used to unmask sensitive headers' })
   @IsOptional()
   @IsNumber()
