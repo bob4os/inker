@@ -23,6 +23,7 @@ export function DataSourceForm() {
     url: '',
     method: 'GET',
     headers: {},
+    body: '',
     refreshInterval: 300,
     isActive: true,
   });
@@ -49,6 +50,7 @@ export function DataSourceForm() {
         url: ds.url,
         method: ds.method,
         headers: ds.headers || {},
+        body: ds.body || '',
         refreshInterval: ds.refreshInterval,
         isActive: ds.isActive,
       });
@@ -111,6 +113,7 @@ export function DataSourceForm() {
         type: formData.type,
         method: formData.method,
         headers: formData.headers,
+        body: formData.body,
         ...(id ? { dataSourceId: parseInt(id, 10) } : {}),
       });
 
@@ -127,6 +130,22 @@ export function DataSourceForm() {
       setTesting(false);
     }
   };
+
+  /**
+   * Warn when a body that will be sent as JSON does not parse.
+   * Only a hint — a custom Content-Type means the body may legitimately not be JSON.
+   */
+  const hasCustomContentType = Object.keys(formData.headers || {}).some(
+    (key) => key.toLowerCase() === 'content-type',
+  );
+  let bodyJsonError: string | null = null;
+  if (formData.method === 'POST' && !hasCustomContentType && formData.body?.trim()) {
+    try {
+      JSON.parse(formData.body);
+    } catch {
+      bodyJsonError = 'Not valid JSON — it will still be sent as-is with Content-Type: application/json';
+    }
+  }
 
   const addHeader = () => {
     if (!headerKey.trim()) return;
@@ -396,6 +415,26 @@ export function DataSourceForm() {
                     <option value="GET">GET</option>
                     <option value="POST">POST</option>
                   </select>
+                </div>
+              )}
+
+              {formData.type === 'json' && formData.method === 'POST' && (
+                <div>
+                  <label className="block text-sm font-medium text-text-secondary mb-1">Request Body</label>
+                  <textarea
+                    value={formData.body || ''}
+                    onChange={(e) => setFormData({ ...formData, body: e.target.value })}
+                    rows={5}
+                    className="w-full px-3 py-2 border border-border-default rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent font-mono text-sm"
+                    placeholder={'{\n  "city": "Berlin",\n  "units": "metric"\n}'}
+                  />
+                  <p className="mt-1 text-xs text-text-muted">
+                    Sent as-is with the request. Content-Type defaults to application/json — add a
+                    Content-Type header below to send another format.
+                  </p>
+                  {bodyJsonError && (
+                    <p className="mt-1 text-xs text-status-error-text">{bodyJsonError}</p>
+                  )}
                 </div>
               )}
 

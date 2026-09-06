@@ -501,6 +501,39 @@ describe('DataSourcesService', () => {
     });
   });
 
+  describe('buildRequestBody()', () => {
+    it('should not send a body for GET requests', () => {
+      expect(service.buildRequestBody('GET', {}, '{"a":1}')).toEqual({ headers: {} });
+    });
+
+    it('should not send a body when it is empty or whitespace', () => {
+      expect(service.buildRequestBody('POST', {}, '')).toEqual({ headers: {} });
+      expect(service.buildRequestBody('POST', {}, '   ')).toEqual({ headers: {} });
+      expect(service.buildRequestBody('POST', {}, null)).toEqual({ headers: {} });
+    });
+
+    it('should send the body verbatim and default Content-Type to JSON', () => {
+      expect(service.buildRequestBody('POST', { 'X-API-Key': 'k' }, '{"a":1}')).toEqual({
+        data: '{"a":1}',
+        headers: { 'X-API-Key': 'k', 'Content-Type': 'application/json' },
+      });
+    });
+
+    it('should keep a user-supplied Content-Type regardless of casing', () => {
+      const headers = { 'content-type': 'application/x-www-form-urlencoded' };
+      expect(service.buildRequestBody('POST', headers, 'a=1&b=2')).toEqual({
+        data: 'a=1&b=2',
+        headers,
+      });
+    });
+
+    it('should not mutate the headers it was given', () => {
+      const headers = { 'X-API-Key': 'k' };
+      service.buildRequestBody('POST', headers, '{"a":1}');
+      expect(headers).toEqual({ 'X-API-Key': 'k' });
+    });
+  });
+
   describe('getCachedData()', () => {
     it('should throw NotFoundException when data source does not exist', async () => {
       mockPrisma.dataSource.findUnique.mockResolvedValue(null);

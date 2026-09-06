@@ -60,6 +60,16 @@ export class CreateDataSourceDto {
   headers?: Record<string, string>;
 
   @ApiPropertyOptional({
+    example: '{"city":"Berlin","units":"metric"}',
+    description:
+      'Request body sent with POST requests. Sent verbatim; Content-Type defaults to application/json unless a Content-Type header is set.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10000)
+  body?: string;
+
+  @ApiPropertyOptional({
     example: 300,
     default: 300,
     description: 'Refresh interval in seconds',
